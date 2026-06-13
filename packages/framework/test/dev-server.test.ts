@@ -1,5 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createDevServer } from "../src/server/dev-server.ts";
 
 const appRoot = fileURLToPath(new URL("../../../examples/hello", import.meta.url));
@@ -33,5 +35,17 @@ describe("dev server", () => {
   it("returns 404 for an unmatched path", async () => {
     const res = await fetch(`${base}/nope`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("dev server — empty routes dir", () => {
+  it("resolves with routeCount === 0 and does not throw when app/routes is missing", async () => {
+    const emptyRoot = mkdtempSync(tmpdir() + "/podkit-test-");
+    const emptyServer = await createDevServer({ appRoot: emptyRoot, port: 0 });
+    try {
+      expect(emptyServer.routeCount).toBe(0);
+    } finally {
+      await emptyServer.close();
+    }
   });
 });

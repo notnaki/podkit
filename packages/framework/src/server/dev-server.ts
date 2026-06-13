@@ -1,7 +1,7 @@
 import { createServer as createViteServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { createServer as createHttpServer, type Server } from "node:http";
-import { readdirSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { buildRouteTable } from "../routing/discover.ts";
 import { matchRoute } from "../routing/match.ts";
@@ -10,6 +10,7 @@ import { renderPage } from "../render/ssr.ts";
 import type { RouteModule } from "../loader/run.ts";
 
 function listFiles(dir: string, root = dir): string[] {
+  if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
@@ -57,6 +58,7 @@ export async function createDevServer(opts: DevServerOptions) {
   });
 
   return {
+    routeCount: table.length,
     async listen(): Promise<string> {
       await new Promise<void>((resolve) => http.listen(opts.port ?? 3000, resolve));
       const addr = http.address();

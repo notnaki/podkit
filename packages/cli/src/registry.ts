@@ -17,7 +17,7 @@ export function createRegistry() {
           new PodkitError(
             "E_BAD_ARGS",
             name ? `Unknown command: ${name}` : "No command given",
-            "Run `podkit docs` to list commands",
+            `Available commands: ${[...commands.keys()].join(", ") || "(none)"}`,
           ),
         );
       }
