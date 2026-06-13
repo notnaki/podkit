@@ -1,4 +1,4 @@
-export type ErrorCode = "E_UNKNOWN" | "E_NO_ROUTES" | "E_BAD_ARGS" | "E_NOT_IMPLEMENTED";
+export type ErrorCode = "E_UNKNOWN" | "E_NO_ROUTES" | "E_BAD_ARGS" | "E_NOT_IMPLEMENTED" | "E_UNAUTHORIZED";
 
 export class PodkitError extends Error {
   code: ErrorCode;
