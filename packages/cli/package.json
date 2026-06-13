@@ -4,6 +4,7 @@
   "type": "module",
   "bin": { "podkit": "./src/bin.ts" },
   "dependencies": {
+    "@podkit/db": "workspace:*",
     "@podkit/framework": "workspace:*"
   }
 }
