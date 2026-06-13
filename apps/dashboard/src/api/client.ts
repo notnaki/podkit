@@ -49,6 +49,8 @@ async function call<T>(
   }
 }
 
+export interface Project { id: string; slug: string; owner: string }
+export interface ProjectDeployment { version: string; hostPort: number; url: string }
 export interface Route { pattern: string; kind: string; file: string; params: string[] }
 export interface ProjectDescription { routes: Route[]; hasDb: boolean; hasAuth: boolean }
 export interface Doc { topic: string; title: string; content: string }
@@ -69,4 +71,11 @@ export const api = {
   rollback: () => call<{ from: string | null; to: string }>("POST", "/v1/rollback", {}),
   authToken: (userId: string, scopes: string[]) =>
     call<{ token: string }>("POST", "/v1/auth/token", { userId, scopes }),
+  listProjects: () => call<{ projects: Project[] }>("GET", "/v1/projects"),
+  createProject: (slug: string, owner: string) =>
+    call<{ project: Project; database: string; connectionString: string }>("POST", "/v1/projects", { slug, owner }),
+  getProject: (slug: string) =>
+    call<{ project: Project; deployment: ProjectDeployment | null; url: string | null }>("GET", `/v1/projects/${encodeURIComponent(slug)}`),
+  deployProject: (slug: string, contextDir: string, containerPort: number) =>
+    call<{ version: string; hostPort: number; url: string }>("POST", `/v1/projects/${encodeURIComponent(slug)}/deploy`, { contextDir, containerPort }),
 };

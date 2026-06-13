@@ -1,0 +1,26 @@
+# Control-plane image for the podkit cloud.
+#
+# Uses the Debian-based node:22 (NOT alpine) because the control-plane shells
+# out to the `docker` CLI to build images and spawn app containers on the host
+# Docker daemon (mounted in via /var/run/docker.sock).
+#
+# The build context is the repo root (see infra/docker-compose.yml `context: ..`).
+FROM node:22
+
+# Install the docker CLI so @podkit/runtime can build/run containers on the
+# host daemon reachable through the mounted socket.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends docker.io \
+  && rm -rf /var/lib/apt/lists/*
+
+# Enable corepack-managed pnpm.
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy the whole repo (node_modules excluded via .dockerignore) and install.
+COPY . .
+RUN pnpm install --frozen-lockfile=false
+
+# The control-plane reads its config from the environment (see serve.ts).
+CMD ["node", "packages/cloud-host/src/serve.ts"]

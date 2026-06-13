@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getConfig, setConfig, api } from "./api/client.ts";
 import { useApi } from "./lib/useApi.ts";
+import { Projects } from "./pages/Projects.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Deployments } from "./pages/Deployments.tsx";
 import { Database } from "./pages/Database.tsx";
@@ -10,6 +11,7 @@ import { Analytics } from "./pages/Analytics.tsx";
 import { DocsPage } from "./pages/DocsPage.tsx";
 
 const NAV = [
+  { id: "projects", label: "Projects", el: <Projects /> },
   { id: "overview", label: "Overview", el: <Overview /> },
   { id: "deployments", label: "Deployments", el: <Deployments /> },
   { id: "database", label: "Database", el: <Database /> },
