@@ -5,7 +5,9 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "cloud:up": "docker compose -f infra/docker-compose.yml up -d --build",
+    "cloud:down": "docker compose -f infra/docker-compose.yml down -v"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
