@@ -116,6 +116,31 @@ importers:
         specifier: workspace:*
         version: link:../telemetry
 
+  packages/cloud-host:
+    dependencies:
+      '@podkit/cloud':
+        specifier: workspace:*
+        version: link:../cloud
+      '@podkit/cloud-store':
+        specifier: workspace:*
+        version: link:../cloud-store
+      '@podkit/db-provision':
+        specifier: workspace:*
+        version: link:../db-provision
+      '@podkit/gateway':
+        specifier: workspace:*
+        version: link:../gateway
+      '@podkit/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      pg:
+        specifier: ^8.13.0
+        version: 8.21.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.20.0
+
   packages/cloud-store:
     dependencies:
       drizzle-orm:
