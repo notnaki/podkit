@@ -7,6 +7,7 @@ import { deployCommand } from "./commands/deploy.ts";
 import { docsCommand } from "./commands/docs.ts";
 import { logsCommand } from "./commands/logs.ts";
 import { analyticsCommand } from "./commands/analytics.ts";
+import { cloudCommand } from "./commands/cloud.ts";
 
 const registry = createRegistry();
 registry.register("dev", devCommand);
@@ -16,6 +17,7 @@ registry.register("deploy", deployCommand);
 registry.register("docs", docsCommand);
 registry.register("logs", logsCommand);
 registry.register("analytics", analyticsCommand);
+registry.register("cloud", cloudCommand);
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
