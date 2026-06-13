@@ -51,6 +51,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@podkit/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@podkit/db':
         specifier: workspace:*
         version: link:../db
