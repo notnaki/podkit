@@ -18,6 +18,18 @@ importers:
         specifier: ^3.0.0
         version: 3.2.6(@types/node@22.19.21)
 
+  examples/hello:
+    dependencies:
+      '@podkit/framework':
+        specifier: workspace:*
+        version: link:../../packages/framework
+      react:
+        specifier: ^19.0.0
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.7(react@19.2.7)
+
   packages/cli:
     dependencies:
       '@podkit/framework':
