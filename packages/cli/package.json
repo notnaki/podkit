@@ -6,6 +6,7 @@
   "dependencies": {
     "@podkit/auth": "workspace:*",
     "@podkit/db": "workspace:*",
+    "@podkit/deploy": "workspace:*",
     "@podkit/framework": "workspace:*"
   }
 }
