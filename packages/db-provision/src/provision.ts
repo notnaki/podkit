@@ -17,8 +17,10 @@ export function sanitizeSlug(slug: string): string {
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_+|_+$/g, "");
-  // Guard against an all-symbol slug that sanitizes to nothing.
-  const body = cleaned.length > 0 ? cleaned : "db";
+  // Guard against an all-symbol slug that sanitizes to nothing, and bound the
+  // length so `proj_` + body stays under Postgres's 63-byte identifier limit
+  // (otherwise distinct slugs sharing a 63-char prefix would collide).
+  const body = (cleaned.length > 0 ? cleaned : "db").slice(0, 50);
   return `proj_${body}`;
 }
 

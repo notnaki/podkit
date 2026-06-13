@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq } from "drizzle-orm";
+import { eq, asc } from "drizzle-orm";
 import { projects, deployments } from "./schema.ts";
 
 export type CreateStoreOptions = {
@@ -135,7 +135,8 @@ export function createStore(opts: CreateStoreOptions): Store {
         status: deployments.status,
       })
       .from(deployments)
-      .where(eq(deployments.projectId, projectId));
+      .where(eq(deployments.projectId, projectId))
+      .orderBy(asc(deployments.createdAt));
     return rows.map((r) => ({
       id: r.id,
       version: r.version ?? "",
