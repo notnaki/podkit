@@ -45,6 +45,9 @@ importers:
       '@podkit/db':
         specifier: workspace:*
         version: link:../db
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@electric-sql/pglite@0.5.2)
 
   packages/cli:
     dependencies:

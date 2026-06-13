@@ -4,6 +4,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "dependencies": {
-    "@podkit/db": "workspace:*"
+    "@podkit/db": "workspace:*",
+    "drizzle-orm": "^0.45.2"
   }
 }
