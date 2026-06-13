@@ -8,6 +8,7 @@
     "@podkit/db": "workspace:*",
     "@podkit/deploy": "workspace:*",
     "@podkit/docs": "workspace:*",
-    "@podkit/framework": "workspace:*"
+    "@podkit/framework": "workspace:*",
+    "@podkit/telemetry": "workspace:*"
   }
 }
