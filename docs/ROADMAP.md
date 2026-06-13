@@ -30,14 +30,24 @@ Seven packages, ~127 tests, clean typecheck. Everything runs **locally** (embedd
 
 ---
 
-## 📋 To do — the cloud platform (the hosted "service")
+## ✅ Done — the real cloud platform (Docker hosting, PR #11)
 
-The two clients exist; the hosted backend is the remaining build:
+The hosted multi-tenant cloud, built on real Docker and tested on a real machine:
+- **`@podkit/runtime`** — builds + runs app **Docker containers**
+- **`@podkit/cloud-store`** — control-plane persistence in **real Postgres**
+- **`@podkit/gateway`** — reverse-proxy edge (`/_p/<project>` → container)
+- **`@podkit/db-provision`** — **managed Postgres-per-project** (Supabase part)
+- **`@podkit/cloud-host`** — `createCloud`: create project → provision DB → build+run container → routed public URL (API-key guarded; full loop proven against real Docker+Postgres)
+- **`infra/docker-compose.yml`** — boots Postgres + control-plane (`pnpm cloud:up`); compose-tested
+- **Clients** — dashboard **Projects** page + **`podkit cloud`** CLI
 
-1. **Control-plane** — *exists (0.8)*. Next: project/tenant model, persistence, CLI pointing at a remote `PODKIT_API_URL`, dashboard auth, more read endpoints (schema/migrations, users/orgs).
-2. **Hosting runtime** — actually *runs* deployed apps for real traffic (microVM/Firecracker or containers), prod SSR bundling, cold-start, edge. **Real infra — needs a provider; not sandbox-buildable.**
-3. **Managed multi-tenant backend** — hosted Postgres per project (+ branching), auth/telemetry ingestion at scale, custom domains + TLS.
-4. **Provisioning / self-host packaging** — Dockerfiles, compose, IaC; the open-source self-host story. **Infra — needs real targets.**
+## 📋 To do — cloud hardening (toward production)
+
+1. **Per-project DB scoped roles** — currently reuses admin creds (MVP); add per-tenant role + least-privilege.
+2. **Deploy-in-compose e2e** — control-plane spawning app containers via the mounted Docker socket, end-to-end.
+3. **Multi-tenant operator auth** — real accounts for the control-plane (vs the shared API key) + dashboard auth; point the dashboard at cloud-host.
+4. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
+5. **Domains/TLS, DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
 
