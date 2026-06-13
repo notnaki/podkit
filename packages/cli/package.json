@@ -1,0 +1,9 @@
+{
+  "name": "@podkit/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "bin": { "podkit": "./src/bin.ts" },
+  "dependencies": {
+    "@podkit/framework": "workspace:*"
+  }
+}
