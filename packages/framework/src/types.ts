@@ -10,4 +10,5 @@ export interface Route {
 export interface LoaderContext {
   params: Record<string, string>;
   url: URL;
+  auth?: { userId: string; isAgent: boolean } | null;
 }
