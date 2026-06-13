@@ -1,0 +1,36 @@
+import type { Route } from "../types.ts";
+
+export function buildRouteTable(files: string[]): Route[] {
+  const routes: Route[] = [];
+  for (const file of files) {
+    if (!/\.(tsx|jsx)$/.test(file)) continue;
+    const base = file.replace(/\.(tsx|jsx)$/, "");
+    const segments = base.split("/");
+    if (segments.some((s) => s.startsWith("_"))) continue;
+
+    const params: string[] = [];
+    let kind: Route["kind"] = "static";
+    const out: string[] = [];
+
+    for (const seg of segments) {
+      if (seg === "index") continue;
+      const catchall = seg.match(/^\[\.\.\.(.+)\]$/);
+      const dynamic = seg.match(/^\[(.+)\]$/);
+      if (catchall) {
+        params.push(catchall[1]);
+        kind = "catchall";
+        out.push(`*${catchall[1]}`);
+      } else if (dynamic) {
+        params.push(dynamic[1]);
+        if (kind !== "catchall") kind = "dynamic";
+        out.push(`:${dynamic[1]}`);
+      } else {
+        out.push(seg);
+      }
+    }
+
+    const pattern = "/" + out.join("/");
+    routes.push({ pattern: pattern === "/" ? "/" : pattern.replace(/\/$/, ""), kind, file, params });
+  }
+  return routes;
+}
