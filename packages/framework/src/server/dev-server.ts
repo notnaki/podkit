@@ -3,10 +3,15 @@ import react from "@vitejs/plugin-react";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { readdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import { randomBytes } from "node:crypto";
+import { verifyToken } from "@podkit/auth";
+import { createSink } from "@podkit/telemetry";
 import { buildRouteTable } from "../routing/discover.ts";
 import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
 import { renderPage } from "../render/ssr.ts";
+import { extractToken } from "../request/token.ts";
+import { buildRequestEvent } from "../request/log.ts";
 import type { RouteModule } from "../loader/run.ts";
 
 function listFiles(dir: string, root = dir): string[] {
@@ -38,21 +43,57 @@ export async function createDevServer(opts: DevServerOptions) {
 
   const clientEntry = "/app/entry-client.tsx";
 
+  const sink = createSink({ file: join(opts.appRoot, ".podkit/telemetry/events.jsonl") });
+
   const http: Server = createHttpServer((req, res) => {
     vite.middlewares(req, res, async () => {
+      const start = Date.now();
+      const requestId = randomBytes(6).toString("hex");
+
+      const token = extractToken(req.headers);
+      const secret = process.env.PODKIT_AUTH_SECRET ?? "podkit-dev-secret";
+      let auth: { userId: string; isAgent: boolean } | null = null;
+      if (token) {
+        const payload = verifyToken(token, secret);
+        if (payload && typeof payload.userId === "string") {
+          auth = { userId: payload.userId, isAgent: payload.kind === "agent" };
+        }
+      }
+
+      const url = new URL(req.url ?? "/", "http://localhost");
+      let status = 200;
       try {
-        const url = new URL(req.url ?? "/", "http://localhost");
         const m = matchRoute(table, url.pathname);
-        if (!m) { res.statusCode = 404; res.end("Not found"); return; }
+        if (!m) {
+          status = 404;
+          res.statusCode = 404;
+          res.end("Not found");
+          return;
+        }
         const mod = (await vite.ssrLoadModule(join(routesDir, m.route.file))) as RouteModule;
-        const data = await runLoader(mod, { params: m.params, url });
+        const data = await runLoader(mod, { params: m.params, url, auth });
         const html = await renderPage(mod, data, clientEntry);
+        status = 200;
         res.statusCode = 200;
         res.setHeader("content-type", "text/html");
         res.end(html);
       } catch (err) {
+        status = 500;
         res.statusCode = 500;
         res.end(err instanceof Error ? err.stack : String(err));
+      } finally {
+        try {
+          sink.append(buildRequestEvent({
+            method: req.method ?? "GET",
+            path: url.pathname,
+            status,
+            durationMs: Date.now() - start,
+            requestId,
+            identity: auth?.userId,
+          }));
+        } catch {
+          // Logging must never break a response.
+        }
       }
     });
   });
