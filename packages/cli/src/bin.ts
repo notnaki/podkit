@@ -4,12 +4,14 @@ import { devCommand } from "./commands/dev.ts";
 import { dbCommand } from "./commands/db.ts";
 import { authCommand } from "./commands/auth.ts";
 import { deployCommand } from "./commands/deploy.ts";
+import { docsCommand } from "./commands/docs.ts";
 
 const registry = createRegistry();
 registry.register("dev", devCommand);
 registry.register("db", dbCommand);
 registry.register("auth", authCommand);
 registry.register("deploy", deployCommand);
+registry.register("docs", docsCommand);
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
