@@ -22,22 +22,22 @@ Seven packages, ~127 tests, clean typecheck. Everything runs **locally** (embedd
 
 ---
 
-## 🚧 In progress
+## ✅ Done — request lifecycle + the cloud's two clients
 
-- **0.7 — Request lifecycle integration** (`phase-0.7-request-lifecycle`): the dev-server threads the **auth identity into every loader** (`ctx.auth`) and **auto-logs every request to telemetry**. Realizes the "one product" thesis at the request level.
-- **0.8 — Control-plane API** (`phase-0.8-control-plane`, this branch): the first real **cloud** piece — an HTTP service (the spec's "one control-plane API") over the pillar packages, returning the same `Envelope` JSON. The CLI and the (future) dashboard are both clients of it. API-key guarded. Local/single-project slice; multi-tenant + remote hosting deferred.
+- **0.7 — Request lifecycle** (PR #7): the dev-server threads the **auth identity into every loader** (`ctx.auth`) and **auto-logs every request to telemetry**. The "one product" thesis at the request level.
+- **0.8 — Control-plane API** (PR #8): `@podkit/cloud` — the spec's "one control-plane API" over the pillars, `Envelope` JSON, API-key guarded (fail-closed), CORS for browser clients. Local/single-project slice.
+- **0.9 — Dashboard** (PR #9): `apps/dashboard` — the human-first-class console over the control-plane API (overview/deployments/database/auth/logs/analytics/docs). The CLI's counterpart client.
 
 ---
 
 ## 📋 To do — the cloud platform (the hosted "service")
 
-Everything above is local. The managed cloud is a separate, larger build:
+The two clients exist; the hosted backend is the remaining build:
 
-1. **Control-plane API** — *started in 0.8*. Next: project/tenant model, persistence of projects, the CLI pointing at a remote `PODKIT_API_URL`.
-2. **Dashboard UI** — the human-first-class web app over the control-plane API (deploys, logs, analytics, DB studio, auth/orgs). **Buildable locally.**
-3. **Hosting runtime** — actually *runs* deployed apps for real traffic (microVM/Firecracker or containers), prod SSR bundling, cold-start, edge. **Real infra — needs a provider; not sandbox-buildable.**
-4. **Managed multi-tenant backend** — hosted Postgres per project (+ branching), auth/telemetry ingestion at scale, custom domains + TLS.
-5. **Provisioning / self-host packaging** — Dockerfiles, compose, IaC; the open-source self-host story. **Infra — needs real targets.**
+1. **Control-plane** — *exists (0.8)*. Next: project/tenant model, persistence, CLI pointing at a remote `PODKIT_API_URL`, dashboard auth, more read endpoints (schema/migrations, users/orgs).
+2. **Hosting runtime** — actually *runs* deployed apps for real traffic (microVM/Firecracker or containers), prod SSR bundling, cold-start, edge. **Real infra — needs a provider; not sandbox-buildable.**
+3. **Managed multi-tenant backend** — hosted Postgres per project (+ branching), auth/telemetry ingestion at scale, custom domains + TLS.
+4. **Provisioning / self-host packaging** — Dockerfiles, compose, IaC; the open-source self-host story. **Infra — needs real targets.**
 
 ---
 
