@@ -9,6 +9,7 @@
     "@podkit/gateway": "workspace:*",
     "@podkit/db-provision": "workspace:*",
     "@podkit/cloud": "workspace:*",
+    "@podkit/auth": "workspace:*",
     "pg": "^8.13.0"
   },
   "devDependencies": {
