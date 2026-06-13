@@ -7,3 +7,4 @@ export { createAuth } from "./core.ts";
 export type { Identity } from "./core.ts";
 export { applySessionGuc } from "./guc.ts";
 export type { SessionIdentity } from "./guc.ts";
+export { resolveAuthSecret } from "./secret.ts";
