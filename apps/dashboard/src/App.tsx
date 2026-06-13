@@ -34,6 +34,10 @@ export function App() {
   const active = NAV.find((n) => n.id === route) ?? NAV[0];
   const health = useApi(() => api.health(), []);
 
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [active.id]);
+
   return (
     <div className="layout">
       <aside className="sidebar">

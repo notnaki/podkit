@@ -28,6 +28,7 @@ function fail(code: string, message: string, hint?: string) {
 export function createControlPlane(opts: {
   projectRoot?: string;
   apiKey?: string;
+  corsOrigin?: string;
 }): { listen(port: number): Promise<{ url: string }>; close(): Promise<void> } {
   const projectRoot = opts.projectRoot ?? process.cwd();
   const deploysRoot = join(projectRoot, ".podkit/deploys");
@@ -139,7 +140,18 @@ export function createControlPlane(opts: {
     return { status: 200, body: ok(rollback(deploysRoot)) };
   });
 
+  const corsOrigin = opts.corsOrigin ?? "*";
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // CORS: the dashboard is a separate origin from the control-plane.
+    res.setHeader("access-control-allow-origin", corsOrigin);
+    res.setHeader("access-control-allow-headers", "content-type, x-podkit-key");
+    res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const method = req.method ?? "GET";
