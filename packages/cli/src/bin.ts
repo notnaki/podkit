@@ -4,6 +4,7 @@ import { devCommand } from "./commands/dev.ts";
 import { dbCommand } from "./commands/db.ts";
 import { authCommand } from "./commands/auth.ts";
 import { deployCommand } from "./commands/deploy.ts";
+import { docsCommand } from "./commands/docs.ts";
 import { logsCommand } from "./commands/logs.ts";
 import { analyticsCommand } from "./commands/analytics.ts";
 
@@ -12,6 +13,7 @@ registry.register("dev", devCommand);
 registry.register("db", dbCommand);
 registry.register("auth", authCommand);
 registry.register("deploy", deployCommand);
+registry.register("docs", docsCommand);
 registry.register("logs", logsCommand);
 registry.register("analytics", analyticsCommand);
 

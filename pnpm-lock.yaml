@@ -60,6 +60,9 @@ importers:
       '@podkit/deploy':
         specifier: workspace:*
         version: link:../deploy
+      '@podkit/docs':
+        specifier: workspace:*
+        version: link:../docs
       '@podkit/framework':
         specifier: workspace:*
         version: link:../framework
@@ -81,6 +84,12 @@ importers:
         version: 0.31.10
 
   packages/deploy:
+    dependencies:
+      '@podkit/framework':
+        specifier: workspace:*
+        version: link:../framework
+
+  packages/docs:
     dependencies:
       '@podkit/framework':
         specifier: workspace:*
