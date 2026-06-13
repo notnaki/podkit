@@ -33,7 +33,15 @@ export function createSink(opts: { file: string }): Sink {
       return readFileSync(file, "utf8")
         .split("\n")
         .filter((line) => line.length > 0)
-        .map((line) => JSON.parse(line) as TelemetryEvent);
+        .flatMap((line) => {
+          // Skip malformed lines (e.g. a write truncated by a crash) rather
+          // than crashing every reader of the sink.
+          try {
+            return [JSON.parse(line) as TelemetryEvent];
+          } catch {
+            return [];
+          }
+        });
     },
   };
 }
@@ -52,7 +60,7 @@ export function query(events: TelemetryEvent[], filter: EventFilter): TelemetryE
     if (filter.level !== undefined && e.level !== filter.level) return false;
     if (filter.route !== undefined && e.route !== filter.route) return false;
     if (filter.name !== undefined && e.name !== filter.name) return false;
-    if (filter.since !== undefined && !(e.ts >= filter.since)) return false;
+    if (filter.since !== undefined && !Number.isNaN(filter.since) && !(e.ts >= filter.since)) return false;
     return true;
   });
 }

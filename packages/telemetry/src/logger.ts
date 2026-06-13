@@ -14,9 +14,9 @@ export function createLogger(
       kind: "log",
       level,
       message,
-      ts: Date.now(),
       ...base,
       ...fields,
+      ts: Date.now(), // live timestamp always wins over any ts in base/fields
     });
   }
 
