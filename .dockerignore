@@ -1,0 +1,13 @@
+# Keep host (macOS) build artifacts out of the linux image; pnpm reinstalls
+# inside the container so node_modules must not be copied in.
+node_modules
+**/node_modules
+dist
+build
+.output
+.podkit
+coverage
+*.log
+.git
+.DS_Store
+*.tsbuildinfo

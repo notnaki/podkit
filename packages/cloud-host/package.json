@@ -1,0 +1,17 @@
+{
+  "name": "@podkit/cloud-host",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@podkit/cloud-store": "workspace:*",
+    "@podkit/runtime": "workspace:*",
+    "@podkit/gateway": "workspace:*",
+    "@podkit/db-provision": "workspace:*",
+    "@podkit/cloud": "workspace:*",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0"
+  }
+}
