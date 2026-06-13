@@ -11,7 +11,7 @@ import {
   initDeploy,
   readDeploy,
 } from "@podkit/deploy";
-import { issueAgentToken } from "@podkit/auth";
+import { issueAgentToken, resolveAuthSecret } from "@podkit/auth";
 import { createSink, query, aggregate } from "@podkit/telemetry";
 import { listTopics, getDoc, describeProject } from "@podkit/docs";
 import { createRouter, sendJson, readJson } from "./router.ts";
@@ -34,7 +34,9 @@ export function createControlPlane(opts: {
   const artifactsRoot = join(projectRoot, ".podkit/artifacts");
   const eventsFile = join(projectRoot, ".podkit/telemetry/events.jsonl");
   const apiKey = opts.apiKey ?? process.env.PODKIT_API_KEY;
-  const authSecret = process.env.PODKIT_AUTH_SECRET ?? "podkit-dev-secret";
+  // Refuses to run in production without PODKIT_AUTH_SECRET (no forgeable
+  // tokens signed with a public default); warns + dev-default otherwise.
+  const authSecret = resolveAuthSecret();
 
   const router = createRouter();
 
