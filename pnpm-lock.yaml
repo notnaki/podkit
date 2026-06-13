@@ -18,6 +18,37 @@ importers:
         specifier: ^3.0.0
         version: 3.2.6(@types/node@22.19.21)(tsx@4.22.4)
 
+  apps/dashboard:
+    dependencies:
+      '@fontsource-variable/hanken-grotesk':
+        specifier: ^5.0.0
+        version: 5.2.8
+      '@fontsource/spline-sans-mono':
+        specifier: ^5.0.0
+        version: 5.2.8
+      react:
+        specifier: ^19.0.0
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.7(react@19.2.7)
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.17)
+      '@vitejs/plugin-react':
+        specifier: ^4.3.0
+        version: 4.7.0(vite@6.4.3(@types/node@22.19.21)(tsx@4.22.4))
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vite:
+        specifier: ^6.0.0
+        version: 6.4.3(@types/node@22.19.21)(tsx@4.22.4)
+
   examples/hello:
     dependencies:
       '@podkit/db':
@@ -682,6 +713,12 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@fontsource-variable/hanken-grotesk@5.2.8':
+    resolution: {integrity: sha512-K7hu09ZKReBc7EifRLeM4K94NZBrxFEg0nGcISmVwlFQOJo4EmYkLXTWEwr5JcNW4z2hr5zy8vLS2sxC8JDmrQ==}
+
+  '@fontsource/spline-sans-mono@5.2.8':
+    resolution: {integrity: sha512-lxHnpGHjPGPXpv+H0SwDZxUkbYrpqSlUBfe1f/ScERQcKhLbQxDMzd7TpRPqIVWC/Ze2WLu0vcOBuL1I8BD5tQ==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -1684,6 +1721,10 @@ snapshots:
 
   '@esbuild/win32-x64@0.28.1':
     optional: true
+
+  '@fontsource-variable/hanken-grotesk@5.2.8': {}
+
+  '@fontsource/spline-sans-mono@5.2.8': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
