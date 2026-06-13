@@ -20,6 +20,9 @@ importers:
 
   examples/hello:
     dependencies:
+      '@podkit/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@podkit/framework':
         specifier: workspace:*
         version: link:../../packages/framework
@@ -39,6 +42,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@podkit/db':
+        specifier: workspace:*
+        version: link:../db
       '@podkit/framework':
         specifier: workspace:*
         version: link:../framework
