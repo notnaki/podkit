@@ -21,36 +21,37 @@ export async function dbCommand(args: string[]): Promise<Envelope<unknown>> {
     mkdirSync(migrationsDir, { recursive: true });
 
     if (subcommand === "migrate") {
-      // Generate migration (tolerate no-diff case)
+      // Generate a migration from the current schema. drizzle-kit may exit
+      // non-zero when there is no schema diff; tolerate ONLY that case and
+      // surface every other (real) generate failure.
       try {
         await generateMigration({ schemaPath, outDir: migrationsDir });
       } catch (genErr) {
-        // drizzle-kit exits non-zero when there is no schema diff; tolerate that
         const msg = genErr instanceof Error ? genErr.message : String(genErr);
-        if (!msg.includes("No schema changes")) {
-          // Re-throw only if it's a real error (not a "nothing to generate" result)
-          // We allow any generate error through silently since it may mean no diff
-          // The apply step will still run on existing migrations.
-        }
+        if (!/no schema changes|nothing to (do|migrate)/i.test(msg)) throw genErr;
       }
 
       const client = createDbClient({ dataDir });
-      const { applied } = await applyMigrations({ client, dir: migrationsDir });
-      await client.close();
-
-      return ok({ migrationsDir, applied });
+      try {
+        const { applied } = await applyMigrations({ client, dir: migrationsDir });
+        return ok({ migrationsDir, applied });
+      } finally {
+        await client.close();
+      }
     }
 
     if (subcommand === "pull") {
       const client = createDbClient({ dataDir });
-      const { migrationFile, tables } = await pullSchema({
-        client,
-        outDir: migrationsDir,
-        timestamp: Date.now(),
-      });
-      await client.close();
-
-      return ok({ migrationFile, tables });
+      try {
+        const { migrationFile, tables } = await pullSchema({
+          client,
+          outDir: migrationsDir,
+          timestamp: Date.now(),
+        });
+        return ok({ migrationFile, tables });
+      } finally {
+        await client.close();
+      }
     }
 
     if (subcommand === "studio") {
