@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function versionsDir(deploysRoot: string): string {
@@ -18,6 +18,29 @@ function readHistory(deploysRoot: string): string[] {
   if (!existsSync(file)) return [];
   const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
   return Array.isArray(parsed) ? (parsed as string[]) : [];
+}
+
+// Atomic pointer write: write to a temp file then rename (atomic on the same
+// filesystem) so a crash or concurrent read never observes a torn `current`.
+function setCurrent(deploysRoot: string, id: string): void {
+  mkdirSync(deploysRoot, { recursive: true });
+  const tmp = currentFile(deploysRoot) + ".tmp";
+  writeFileSync(tmp, id);
+  renameSync(tmp, currentFile(deploysRoot));
+}
+
+// The distinct promotion timeline (order of first occurrence). Used to walk
+// rollback back through every prior version, not just toggle the two newest.
+function distinctHistory(deploysRoot: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of readHistory(deploysRoot)) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
 }
 
 export function publishVersion(opts: {
@@ -40,11 +63,14 @@ export function promote(deploysRoot: string, id: string): void {
   if (!existsSync(join(versionsDir(deploysRoot), id))) {
     throw new Error("unknown version: " + id);
   }
-  mkdirSync(deploysRoot, { recursive: true });
-  writeFileSync(currentFile(deploysRoot), id);
+  setCurrent(deploysRoot, id);
+  // Append to the promotion log, deduping consecutive duplicates so re-promoting
+  // the same version doesn't bloat history or break rollback.
   const history = readHistory(deploysRoot);
-  history.push(id);
-  writeFileSync(historyFile(deploysRoot), JSON.stringify(history));
+  if (history[history.length - 1] !== id) {
+    history.push(id);
+    writeFileSync(historyFile(deploysRoot), JSON.stringify(history));
+  }
 }
 
 export function getCurrent(deploysRoot: string): string | null {
@@ -54,24 +80,18 @@ export function getCurrent(deploysRoot: string): string | null {
 }
 
 export function rollback(deploysRoot: string): { from: string | null; to: string } {
-  const history = readHistory(deploysRoot);
   const current = getCurrent(deploysRoot);
+  const timeline = distinctHistory(deploysRoot);
 
-  // Find the second-to-last DISTINCT entry: the last distinct value that differs
-  // from the most recent (current) one.
-  let to: string | null = null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const entry = history[i];
-    if (entry !== undefined && entry !== current) {
-      to = entry;
-      break;
-    }
-  }
+  // Walk back one step through the distinct promotion timeline. Repeated
+  // rollbacks keep moving toward older versions (not toggling the two newest).
+  const idx = current === null ? -1 : timeline.indexOf(current);
+  const to = idx > 0 ? timeline[idx - 1] : undefined;
 
-  if (to === null) {
+  if (to === undefined) {
     throw new Error("no previous version");
   }
 
-  writeFileSync(currentFile(deploysRoot), to);
+  setCurrent(deploysRoot, to);
   return { from: current, to };
 }

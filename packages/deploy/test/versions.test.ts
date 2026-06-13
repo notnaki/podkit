@@ -57,6 +57,38 @@ describe("versions", () => {
   });
 });
 
+describe("multi-step rollback", () => {
+  it("walks back through every distinct version, not just the two newest", () => {
+    const root = mkdtempSync(join(tmpdir(), "podkit-multi-"));
+    const art = mkdtempSync(join(tmpdir(), "podkit-multi-art-"));
+    writeFileSync(join(art, "a.txt"), "x");
+    for (const id of ["a", "b", "c"]) {
+      publishVersion({ artifactDir: art, deploysRoot: root, id });
+      promote(root, id);
+    }
+    expect(getCurrent(root)).toBe("c");
+    expect(rollback(root)).toEqual({ from: "c", to: "b" });
+    expect(rollback(root)).toEqual({ from: "b", to: "a" }); // keeps walking back
+    expect(() => rollback(root)).toThrow("no previous version");
+    rmSync(root, { recursive: true, force: true });
+    rmSync(art, { recursive: true, force: true });
+  });
+
+  it("dedupes consecutive promotes of the same version", () => {
+    const root = mkdtempSync(join(tmpdir(), "podkit-dedup-"));
+    const art = mkdtempSync(join(tmpdir(), "podkit-dedup-art-"));
+    writeFileSync(join(art, "a.txt"), "x");
+    publishVersion({ artifactDir: art, deploysRoot: root, id: "v1" });
+    publishVersion({ artifactDir: art, deploysRoot: root, id: "v2" });
+    promote(root, "v1");
+    promote(root, "v2");
+    promote(root, "v2"); // duplicate — must not bloat history or break rollback
+    expect(rollback(root)).toEqual({ from: "v2", to: "v1" });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(art, { recursive: true, force: true });
+  });
+});
+
 describe("versions on empty root", () => {
   it("listVersions returns [] when none", () => {
     const empty = mkdtempSync(join(tmpdir(), "podkit-empty-"));
