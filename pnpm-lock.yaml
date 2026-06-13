@@ -70,6 +70,21 @@ importers:
         specifier: workspace:*
         version: link:../telemetry
 
+  packages/cloud:
+    dependencies:
+      '@podkit/auth':
+        specifier: workspace:*
+        version: link:../auth
+      '@podkit/deploy':
+        specifier: workspace:*
+        version: link:../deploy
+      '@podkit/docs':
+        specifier: workspace:*
+        version: link:../docs
+      '@podkit/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+
   packages/db:
     dependencies:
       '@electric-sql/pglite':
