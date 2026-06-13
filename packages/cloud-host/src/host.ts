@@ -93,10 +93,24 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     body: ok({ status: "ok" }),
   }));
 
-  router.register("GET", "/v1/projects", async () => ({
-    status: 200,
-    body: ok({ projects: await store.listProjects() }),
-  }));
+  router.register("GET", "/v1/projects", async () => {
+    // Enrich each project with its latest deployment + routed URL so the
+    // console can render Vercel-style cards (domain + status) without N fetches.
+    const projects = await store.listProjects();
+    const enriched = await Promise.all(
+      projects.map(async (p) => {
+        const deps = await store.listDeployments(p.id);
+        const latest = deps[deps.length - 1] ?? null;
+        return {
+          ...p,
+          version: latest ? latest.version : null,
+          status: latest ? latest.status : null,
+          url: latest ? gatewayUrl + "/_p/" + p.slug + "/" : null,
+        };
+      }),
+    );
+    return { status: 200, body: ok({ projects: enriched }) };
+  });
 
   router.register("POST", "/v1/projects", async ({ headers, body }) => {
     const denied = guard(headers);
@@ -211,6 +225,15 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
   const server = createServer(
     async (req: IncomingMessage, res: ServerResponse) => {
+      // CORS: the cloud console is a separate origin from the control-plane.
+      res.setHeader("access-control-allow-origin", "*");
+      res.setHeader("access-control-allow-headers", "content-type, x-podkit-key");
+      res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+      if (req.method === "OPTIONS") {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
       try {
         const url = new URL(req.url ?? "/", "http://localhost");
         const method = req.method ?? "GET";
