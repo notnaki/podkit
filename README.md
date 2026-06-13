@@ -78,3 +78,25 @@ insecure default (with a warning) and **production refuses to run**.
 
 Deferred: OAuth/passkeys/SSO, session-table revocation + token expiry, automatic
 per-request session→GUC injection in the dev-server loader, org-switching UX.
+
+## Phase 0.4 — Deploy mechanics (`@podkit/deploy`)
+
+The deploy *lifecycle*: package the app into an immutable artifact, version it,
+promote atomically, roll back instantly, and the anonymous→claim protocol.
+
+```bash
+cd examples/hello
+node ../../packages/cli/src/bin.ts deploy up --json       # build artifact -> publish version -> promote
+node ../../packages/cli/src/bin.ts deploy deployments --json
+node ../../packages/cli/src/bin.ts deploy rollback --json  # instant rollback to the previous version
+node ../../packages/cli/src/bin.ts deploy claim <owner> --json
+```
+
+What works today: `buildArtifact` (copies the app + writes a route manifest),
+immutable versions with an **atomic** `current` pointer, **multi-step** rollback
+through the promotion timeline, and `initDeploy`/`claimDeploy` (anonymous→owned).
+CLI: `podkit deploy up|promote|rollback|deployments|claim`.
+
+Deferred (real infra): production bundling/minification, the cloud/microVM
+runtime that actually serves a deployed app, custom domains/TLS, and preview
+deploys wired to DB branches.
