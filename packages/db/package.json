@@ -1,0 +1,13 @@
+{
+  "name": "@podkit/db",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.2",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.10"
+  }
+}
