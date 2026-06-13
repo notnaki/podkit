@@ -5,12 +5,27 @@ import { createAuth, issueAgentToken, verifyToken } from "@podkit/auth";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 
-const secret = process.env.PODKIT_AUTH_SECRET ?? "podkit-dev-secret";
+function resolveSecret(): string {
+  const fromEnv = process.env.PODKIT_AUTH_SECRET;
+  if (fromEnv) return fromEnv;
+  if (process.env.NODE_ENV === "production") {
+    throw new PodkitError(
+      "E_BAD_ARGS",
+      "PODKIT_AUTH_SECRET is required in production",
+      "Set PODKIT_AUTH_SECRET to a strong random secret before signing or verifying tokens",
+    );
+  }
+  console.warn(
+    "[podkit] PODKIT_AUTH_SECRET not set — using an insecure dev default; never use this in production",
+  );
+  return "podkit-dev-secret";
+}
 
 export async function authCommand(args: string[]): Promise<Envelope<unknown>> {
   const [subcommand, ...rest] = args;
 
   try {
+    const secret = resolveSecret();
     if (subcommand === "token") {
       // Parse --user <id> and zero-or-more --scope <s> flags
       const userIdx = rest.indexOf("--user");
