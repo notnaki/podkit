@@ -49,5 +49,32 @@ What works today: schema-as-code over drizzle pg-core (`@podkit/db`), `db migrat
 `db pull` (introspect live DB → migration file), and a two-tier RLS policy DSL
 (`ownedBy` / `inOrg` / `isAgent` + `customPolicy`). `db studio` is a stub.
 
-Deferred to later phases: RLS injection into loaders with the auth session
-(Phase 0.3), `db pull` regenerating the TS schema, DB branching, realtime.
+Deferred to later phases: `db pull` regenerating the TS schema, DB branching, realtime.
+
+## Phase 0.3 — Auth (`@podkit/auth`)
+
+Two first-class identities (human users + agent tokens) on owned primitives —
+scrypt password hashing, HMAC signed tokens, an org/RBAC model — plus the wiring
+that **completes the RLS story**: an authenticated session sets Postgres GUCs
+(`podkit.user_id` / `podkit.org_id` / `podkit.is_agent`) so the row-level
+policies from `@podkit/db` actually filter rows.
+
+```bash
+export PODKIT_AUTH_SECRET="$(openssl rand -hex 32)"   # required in production
+
+# agents-first surface — issue and verify scoped agent tokens (no DB needed):
+node packages/cli/src/bin.ts auth token --user <id> --scope read --json
+node packages/cli/src/bin.ts auth whoami --token <token> --json
+
+# human users (DB-backed):
+node packages/cli/src/bin.ts auth signup --email a@b.com --password ... --json
+node packages/cli/src/bin.ts auth login  --email a@b.com --password ... --json
+```
+
+What works today: `createAuth({db,secret})` (signup/login/verifySession/agent
+tokens), `applySessionGuc` (session → RLS, proven end-to-end), RBAC helpers, and
+`podkit auth token|whoami|signup|login`. Without `PODKIT_AUTH_SECRET`, dev uses an
+insecure default (with a warning) and **production refuses to run**.
+
+Deferred: OAuth/passkeys/SSO, session-table revocation + token expiry, automatic
+per-request session→GUC injection in the dev-server loader, org-switching UX.
