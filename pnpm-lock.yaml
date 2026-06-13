@@ -63,6 +63,9 @@ importers:
       '@podkit/framework':
         specifier: workspace:*
         version: link:../framework
+      '@podkit/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
 
   packages/db:
     dependencies:
@@ -104,6 +107,8 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.0
         version: 19.2.3(@types/react@19.2.17)
+
+  packages/telemetry: {}
 
 packages:
 
