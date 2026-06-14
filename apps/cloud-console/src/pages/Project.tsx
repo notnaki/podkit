@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
 import { useApi } from "../lib/useApi.ts";
 
-const TABS = ["Overview", "Deployments", "Storage", "Domains", "Environment", "Settings"] as const;
+const TABS = ["Overview", "Deployments", "Logs", "Storage", "Domains", "Environment", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
@@ -76,6 +76,8 @@ export function Project({ slug }: { slug: string }) {
           </div>
         ) : tab === "Deployments" ? (
           <Deployments slug={slug} url={url} reload={detail.reload} />
+        ) : tab === "Logs" ? (
+          <Logs slug={slug} />
         ) : tab === "Storage" ? (
           <section className="panel">
             <div className="panel-head"><h3>Database</h3><span className="status status-ready"><span className="dot" />Postgres</span></div>
@@ -189,6 +191,38 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
         <div className="panel-foot">Rolling back re-runs a previous build and instantly reroutes the URL to it.</div>
       </section>
     </div>
+  );
+}
+
+function Logs({ slug }: { slug: string }) {
+  const logs = useApi(() => api.getLogs(slug), [slug]);
+  const data = logs.data ?? null;
+  const text = data?.logs ?? "";
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h3>Runtime logs</h3>
+        <div className="row" style={{ gap: "var(--space-md)", alignItems: "center" }}>
+          {data?.version && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{data.version}</span>}
+          <button className="btn btn-ghost" disabled={logs.loading} onClick={() => logs.reload()}>{logs.loading ? "Refreshing…" : "Refresh"}</button>
+        </div>
+      </div>
+      <div className="panel-body flush" style={{ padding: 0 }}>
+        {logs.loading ? (
+          <div className="state">Loading…</div>
+        ) : logs.error ? (
+          <div className="state"><strong>{logs.error.code}</strong><span>{logs.error.message}</span></div>
+        ) : !data?.deploymentId ? (
+          <div className="state"><strong>No deployment yet</strong><span>Deploy this project to see its container logs.</span></div>
+        ) : text.trim() === "" ? (
+          <div className="state"><strong>No log output</strong><span>The running container hasn&apos;t written anything to stdout/stderr yet.</span></div>
+        ) : (
+          <pre className="logs mono">{text}</pre>
+        )}
+      </div>
+      <div className="panel-foot">Streamed from the active deployment&apos;s container (<span className="mono">docker logs</span>). Refresh to pull the latest.</div>
+    </section>
   );
 }
 

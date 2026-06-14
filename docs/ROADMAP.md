@@ -47,6 +47,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Env vars** (PR #16): project_env (sensitive/plain), `POST/GET/DELETE /v1/projects/:slug/env` (masked on read), injected into the container at deploy, console Environment tab + `podkit cloud env set|list|rm`.
 - **Custom domains** (PR #17): project_domains, gateway resolves by Host header (domain→slug→container), console Domains tab + `podkit cloud domains add|list|rm`.
 - **Deployment history + rollback** (PR #18): deployments persist `container_port`+`kind`; `GET /v1/projects/:slug/deployments` (newest-first, active flag) + `POST /v1/projects/:slug/rollback {deploymentId}` re-runs a prior version's immutable image as a new deployment and reroutes instantly. Console Deployments tab is a full history table with per-row Rollback/Current; `podkit cloud deployments|rollback`.
+- **Runtime logs** (PR #19): `GET /v1/projects/:slug/logs[?deploymentId=]` returns a deployment's container logs (`docker logs` of the active deployment by default). **Auth-required** (logs can contain secrets) — unlike the other open read endpoints. Console **Logs** tab (terminal-style, refresh) + `podkit cloud logs <slug>`.
 
 ## 📋 To do — cloud hardening (toward production)
 

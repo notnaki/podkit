@@ -109,6 +109,11 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/rollback`,
       { deploymentId },
     ),
+  getLogs: (slug: string) =>
+    call<{ deploymentId: string | null; version: string | null; logs: string }>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/logs`,
+    ),
   deployProject: (slug: string, contextDir: string, containerPort: number) =>
     call<{ version: string; hostPort: number; url: string }>(
       "POST",

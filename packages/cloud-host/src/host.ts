@@ -11,6 +11,7 @@ import {
   buildImage,
   runContainer,
   stopContainer,
+  containerLogs,
   isPodkitApp,
   buildPodkitApp,
 } from "@podkit/runtime";
@@ -510,6 +511,68 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         active: d.id === activeId,
       }));
     return { status: 200, body: ok({ deployments: items }) };
+  });
+
+  router.register(
+    "GET",
+    "/v1/projects/:slug/logs",
+    async ({ headers, params, query }) => {
+    // Runtime logs can contain secrets (injected env, tokens), so unlike the
+    // other read endpoints this one requires credentials.
+    if (!(await guardMutation(headers))) return unauthorized();
+    const slug = params.slug!;
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return {
+        status: 404,
+        body: fail("E_NOT_FOUND", "unknown project: " + slug),
+      };
+    }
+    // Logs for a specific deployment (?deploymentId=...) or, by default, the
+    // active one (the most recent deployment for this project).
+    const wanted = query.get("deploymentId");
+    let target: { id: string; version: string; containerId: string } | null =
+      null;
+    if (wanted) {
+      const d = await store.getDeploymentById(wanted);
+      if (d && d.projectId === project.id) {
+        target = { id: d.id, version: d.version, containerId: d.containerId };
+      }
+    } else {
+      const deployments = await store.listDeployments(project.id);
+      const active = deployments[deployments.length - 1];
+      if (active) {
+        target = {
+          id: active.id,
+          version: active.version,
+          containerId: active.containerId,
+        };
+      }
+    }
+    if (!target) {
+      return {
+        status: 200,
+        body: ok({ deploymentId: null, version: null, logs: "" }),
+      };
+    }
+    // The container is addressed by its id; docker logs accepts id or name.
+    // A pruned/stopped container yields an error we surface as empty logs.
+    let logs = "";
+    if (target.containerId) {
+      try {
+        logs = await containerLogs(target.containerId);
+      } catch {
+        logs = "";
+      }
+    }
+    return {
+      status: 200,
+      body: ok({
+        deploymentId: target.id,
+        version: target.version,
+        logs,
+      }),
+    };
   });
 
   router.register(
