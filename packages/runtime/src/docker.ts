@@ -21,6 +21,11 @@ export interface RunContainerOptions {
   cpus?: string;
   pidsLimit?: number;
   nofile?: number;
+  // Attach the container to this Docker network. When the control-plane itself
+  // runs in a container, it reaches app containers by name over a shared
+  // network (the published host port is on the host's loopback, unreachable
+  // from inside the control-plane container).
+  network?: string;
 }
 
 export interface RunContainerResult {
@@ -73,6 +78,10 @@ export async function runContainer(opts: RunContainerOptions): Promise<RunContai
     "--ulimit",
     `nofile=${opts.nofile ?? 1024}:${opts.nofile ?? 1024}`,
   ];
+
+  if (opts.network) {
+    args.push("--network", opts.network);
+  }
 
   if (opts.env) {
     for (const [key, value] of Object.entries(opts.env)) {

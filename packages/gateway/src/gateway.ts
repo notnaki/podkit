@@ -8,7 +8,7 @@ import {
 export type Resolver = (req: {
   host: string;
   path: string;
-}) => { hostPort: number; slug?: string | null } | null;
+}) => { hostPort: number; host?: string; slug?: string | null } | null;
 
 // Observability hook invoked once per request with non-sensitive metadata only:
 // the resolved project slug (or null), the response status class, and the
@@ -61,7 +61,10 @@ export function createGateway(opts: {
     const strippedPath = stripPathPrefix(path);
     const upstream = httpRequest(
       {
-        host: "localhost",
+        // host defaults to localhost (host-mode: app published on the host's
+        // loopback). In container mode the resolver returns the app container's
+        // name, reachable over the shared Docker network by its embedded DNS.
+        host: route.host ?? "localhost",
         port: route.hostPort,
         method: req.method,
         path: strippedPath,
