@@ -339,6 +339,26 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   const domainMap = new Map<string, string>();
   // names of app containers we started, so close() can tear them down.
   const runningContainers: string[] = [];
+  // slug -> name of the container currently serving it, so a new deploy/rollback
+  // can reap the one it superseded (otherwise dead containers leak until close).
+  const activeContainer = new Map<string, string>();
+
+  // Make `name` the live container for `slug` and stop the one it replaced.
+  // Called AFTER routeMap is switched, so the old container is already off the
+  // routing path — reaping it only reclaims resources, never drops traffic.
+  async function reapSuperseded(slug: string, name: string): Promise<void> {
+    const prev = activeContainer.get(slug);
+    activeContainer.set(slug, name);
+    if (prev && prev !== name) {
+      const idx = runningContainers.indexOf(prev);
+      if (idx !== -1) runningContainers.splice(idx, 1);
+      try {
+        await stopContainer(prev);
+      } catch {
+        // Best-effort: the old container may already be gone.
+      }
+    }
+  }
 
   // In-memory fixed-window rate limiter for CLI approval, keyed by accountId.
   // A secondary defense against userCode brute-forcing: even with high entropy,
@@ -590,6 +610,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         kind: "deploy",
       });
       routeMap.set(slug, hostPort);
+      await reapSuperseded(slug, name);
 
       return {
         status: 200,
@@ -865,6 +886,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
       // Drop in-memory routing state for this project.
       routeMap.delete(slug);
+      activeContainer.delete(slug);
       for (const { domain } of await store.listDomains(project.id)) {
         domainMap.delete(domain);
       }
@@ -1138,6 +1160,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         kind: "rollback",
       });
       routeMap.set(slug, started.hostPort);
+      await reapSuperseded(slug, name);
 
       return {
         status: 200,
