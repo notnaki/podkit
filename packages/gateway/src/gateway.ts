@@ -53,7 +53,7 @@ export function createGateway(opts: {
         statusCode: 502,
         latencyMs: Date.now() - requestStart,
       });
-      fail(res, 502, "E_NO_ROUTE", "No route for host=" + host + " path=" + path);
+      fail(res, 502, "E_NO_ROUTE", "No route found");
       return;
     }
     const slug = route.slug ?? null;
@@ -87,7 +87,10 @@ export function createGateway(opts: {
         latencyMs: Date.now() - requestStart,
       });
       if (!res.headersSent) {
-        fail(res, 502, "E_UPSTREAM", "Upstream request failed: " + err.message);
+        // Log the real cause server-side for debugging, but never leak internal
+        // upstream details (loopback ports, container DNS names) to clients.
+        console.error("gateway upstream error:", err.message);
+        fail(res, 502, "E_UPSTREAM", "Upstream request failed");
       } else {
         res.destroy();
       }

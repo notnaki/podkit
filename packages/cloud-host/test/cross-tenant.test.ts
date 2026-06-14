@@ -200,6 +200,39 @@ describe("cloud-host cross-tenant project isolation (real Docker + Postgres)", (
       });
       expect(deployB.status).toBe(403);
 
+      // Regression: a non-owner deploy with a contextDir that validateContextDir
+      // would reject (a system dir, or a path that doesn't exist) must STILL be
+      // 403 — the ownership check runs BEFORE filesystem validation, so the
+      // distinct 400 filesystem-probing error messages never leak to non-owners.
+      for (const badContextDir of [
+        "/etc", // system directory -> would 400 if validated before authz
+        "/tmp/podkit-nonexistent-" + suffix, // missing path -> would 400
+      ]) {
+        const probe = await fetch(base + "/deploy", {
+          method: "POST",
+          headers: bearerBJson,
+          body: JSON.stringify({ contextDir: badContextDir, containerPort: 3000 }),
+        });
+        expect(probe.status, "deploy probe " + badContextDir).toBe(403);
+        const probeBody = await probe.json();
+        expect(probeBody.error.code).toBe("E_FORBIDDEN");
+      }
+
+      // Same regression for deploy-branch: ownership (403) must precede the
+      // contextDir filesystem validation.
+      const deployBranchProbe = await fetch(base + "/deploy-branch", {
+        method: "POST",
+        headers: bearerBJson,
+        body: JSON.stringify({
+          branchName: "probe",
+          contextDir: "/etc",
+          containerPort: 3000,
+        }),
+      });
+      expect(deployBranchProbe.status).toBe(403);
+      const deployBranchProbeBody = await deployBranchProbe.json();
+      expect(deployBranchProbeBody.error.code).toBe("E_FORBIDDEN");
+
       const envB = await fetch(base + "/env", {
         method: "POST",
         headers: bearerBJson,

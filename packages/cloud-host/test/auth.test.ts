@@ -258,6 +258,23 @@ describe("cloud-host account auth + CLI device flow (real Docker + Postgres)", (
   );
 
   it(
+    "signup rejects malformed email addresses",
+    async () => {
+      const badEmailRes = await fetch(apiUrl + "/v1/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "not-an-email", password: "12345678" }),
+      });
+      expect(badEmailRes.status).toBe(400);
+      const badEmailBody = await badEmailRes.json();
+      expect(badEmailBody.ok).toBe(false);
+      expect(badEmailBody.error.code).toBe("E_BAD_ARGS");
+      expect(badEmailBody.error.message).toMatch(/invalid email format/);
+    },
+    120000,
+  );
+
+  it(
     "rate-limits CLI approval after 10 attempts per account within the window",
     async () => {
       // Fresh account so this account's rate-limit counter is isolated.

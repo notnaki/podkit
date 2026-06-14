@@ -114,6 +114,24 @@ async function pollGateway(
   return last;
 }
 
+// List names of containers (running or exited) whose name starts with `prefix`.
+// Used to prove the production container is actually torn down by DELETE project.
+async function containersWithPrefix(prefix: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("docker", [
+    "ps",
+    "-a",
+    "--filter",
+    "label=" + TEST_LABEL,
+    "--format",
+    "{{.Names}}",
+  ]);
+  return stdout
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .filter((name) => name.startsWith(prefix));
+}
+
 async function dumpAppLogs(): Promise<string> {
   let logs = "";
   try {
@@ -469,12 +487,28 @@ describe("cloud-host branch preview deploy (real Docker + Postgres)", () => {
       );
       expect(stopAgain.status).toBe(200);
 
+      // Sanity: the production container is still running just before teardown.
+      // (Its name is podkit-app-<slug>-<rand>.) The history at this point ends
+      // with a kind="stopped" (containerId="") row from the preview teardown
+      // above, so a naive "stop the last deployment row" teardown would skip the
+      // real prod container and orphan it.
+      const prodPrefix = "podkit-app-" + slug + "-";
+      expect((await containersWithPrefix(prodPrefix)).length).toBe(1);
+
       // (10) Clean up: delete the project (drops base DB + cascades).
       const delProj = await fetch(apiUrl + `/v1/projects/${slug}`, {
         method: "DELETE",
         headers: ownerJson,
       });
       expect(delProj.status).toBe(200);
+
+      // (11) DELETE project must stop the actual production container, scanning
+      // newest->oldest for the deploy/rollback row rather than the trailing
+      // kind="stopped" row. Containers run with --rm, so a stopped one is gone
+      // from `docker ps -a`. Regression guard: before the fix the prod container
+      // was left running here.
+      const orphans = await containersWithPrefix(prodPrefix);
+      expect(orphans).toEqual([]);
     },
     300000,
   );

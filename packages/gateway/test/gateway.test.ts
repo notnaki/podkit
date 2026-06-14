@@ -4,6 +4,7 @@ import { createGateway, type Resolver } from "../src/index.ts";
 
 let upstream: Server;
 let upstreamPort: number;
+let deadPort: number;
 let gateway: ReturnType<typeof createGateway>;
 let gatewayUrl: string;
 
@@ -17,10 +18,26 @@ beforeAll(async () => {
   const addr = upstream.address();
   upstreamPort = typeof addr === "object" && addr ? addr.port : 0;
 
-  const resolve: Resolver = ({ path }) =>
-    path.startsWith("/_p/demo/") || path === "/_p/demo"
-      ? { hostPort: upstreamPort }
-      : null;
+  // Reserve a port, then release it so connections to it are refused.
+  const dead = createServer();
+  await new Promise<void>((resolve) => dead.listen(0, resolve));
+  const deadAddr = dead.address();
+  deadPort = typeof deadAddr === "object" && deadAddr ? deadAddr.port : 0;
+  await new Promise<void>((resolve, reject) =>
+    dead.close((err) => (err ? reject(err) : resolve())),
+  );
+
+  const resolve: Resolver = ({ path }) => {
+    if (path.startsWith("/_p/demo/") || path === "/_p/demo") {
+      return { hostPort: upstreamPort };
+    }
+    // Route /_p/dead/* to a port nothing is listening on, to trigger an
+    // upstream connection error (ECONNREFUSED).
+    if (path.startsWith("/_p/dead/") || path === "/_p/dead") {
+      return { hostPort: deadPort };
+    }
+    return null;
+  };
 
   gateway = createGateway({ resolve });
   const listened = await gateway.listen(0);
@@ -51,9 +68,34 @@ describe("createGateway", () => {
     async () => {
       const res = await fetch(gatewayUrl + "/_p/unknown/x");
       expect(res.status).toBe(502);
-      const body = (await res.json()) as { ok: boolean; error: { code: string } };
+      const body = (await res.json()) as {
+        ok: boolean;
+        error: { code: string; message: string };
+      };
       expect(body.ok).toBe(false);
       expect(body.error.code).toBe("E_NO_ROUTE");
+      // The error message must not reflect the attacker-controlled host/path.
+      expect(body.error.message).toBe("No route found");
+      expect(body.error.message).not.toContain("/_p/unknown");
+    },
+    30000,
+  );
+
+  it(
+    "returns 502 E_UPSTREAM without leaking internal upstream details",
+    async () => {
+      const res = await fetch(gatewayUrl + "/_p/dead/x");
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as {
+        ok: boolean;
+        error: { code: string; message: string };
+      };
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("E_UPSTREAM");
+      // Must not leak the internal port number or the underlying error cause.
+      expect(body.error.message).toBe("Upstream request failed");
+      expect(body.error.message).not.toContain(String(deadPort));
+      expect(body.error.message).not.toMatch(/ECONNREFUSED|ENOTFOUND|connect/i);
     },
     30000,
   );
