@@ -85,7 +85,7 @@ The user intends to release podkit. Triage of what's needed, by audience.
 **Blocking a PUBLIC / untrusted multi-tenant release (heavier, several need sign-off):**
 - [ ] **docker.sock host-escape** — a tenant container breakout = host root. Needs a brokered build/run service or an orchestrator (k8s/Nomad). *(Architectural.)*
 - [ ] **Secret-injection redesign** — secrets still passed as plaintext `-e` to containers + conn string returned at create. *(Architectural.)*
-- [ ] **Per-account quotas + API rate limiting** — cap projects/containers/CPU/mem/disk per account; global request rate limits; abuse/teardown policy.
+- [~] **Per-account quotas + API rate limiting** — DONE (PR #41): per-account **project quota** (`PODKIT_MAX_PROJECTS_PER_ACCOUNT`) + **API rate limiting** (`PODKIT_RATE_LIMIT_PER_MIN`, per credential/IP). Remaining: per-account CPU/mem/disk/container caps + an abuse/teardown policy.
 - [ ] Domain ownership verification (DNS TXT) before routing a custom domain; per-domain TLS.
 - [ ] Billing/usage metering (later).
 - [ ] Operator observability/alerting (control-plane health, build failures, disk).
