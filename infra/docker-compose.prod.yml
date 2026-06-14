@@ -1,0 +1,59 @@
+# Production podkit cloud: control-plane + gateway + its Postgres.
+#
+# Unlike docker-compose.yml (dev), this requires real secrets via an env file
+# and runs the control-plane with NODE_ENV=production, so it REFUSES to boot
+# with insecure dev-default secrets. Copy infra/.env.example to infra/.env,
+# fill it in, then:
+#
+#   docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build
+#
+# The control-plane talks to the host Docker daemon (mounted socket) to build
+# images and spawn per-project app containers, so deploy this on a Docker-capable
+# VM (Hetzner / DigitalOcean / Fly.io machine / EC2 / GCE), not a serverless PaaS.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  controlplane:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.controlplane
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PODKIT_CP_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      PODKIT_ADMIN_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
+      # Required in production (the control-plane refuses dev defaults):
+      PODKIT_AUTH_SECRET: ${PODKIT_AUTH_SECRET:?set PODKIT_AUTH_SECRET in infra/.env}
+      PODKIT_SECRETS_KEY: ${PODKIT_SECRETS_KEY:?set PODKIT_SECRETS_KEY in infra/.env}
+      PODKIT_API_KEY: ${PODKIT_API_KEY:?set PODKIT_API_KEY in infra/.env}
+      PODKIT_API_PORT: "8080"
+      PODKIT_GATEWAY_PORT: "8090"
+      PODKIT_CONSOLE_DIR: /app/apps/cloud-console/dist
+      # Where the console is reached (used to build CLI device-flow verify URLs)
+      # and which browser origins may call the API (omit to allow any):
+      PODKIT_CONSOLE_URL: ${PODKIT_CONSOLE_URL:-}
+      PODKIT_CORS_ORIGINS: ${PODKIT_CORS_ORIGINS:-}
+    ports:
+      # Console + API. Put a TLS terminator (Caddy/Traefik) in front for HTTPS.
+      - "${PODKIT_API_BIND:-8080}:8080"
+      # Gateway: serves deployed apps by path (/_p/<slug>) and custom domain.
+      - "${PODKIT_GATEWAY_BIND:-8090}:8090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pgdata:
