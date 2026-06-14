@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
 import { useApi } from "../lib/useApi.ts";
 
-const TABS = ["Overview", "Deployments", "Storage", "Settings"] as const;
+const TABS = ["Overview", "Deployments", "Storage", "Environment", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
@@ -87,6 +87,8 @@ export function Project({ slug }: { slug: string }) {
             </div>
             <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
           </section>
+        ) : tab === "Environment" ? (
+          <Environment slug={slug} />
         ) : (
           <section className="panel">
             <div className="panel-head"><h3>Settings</h3></div>
@@ -142,6 +144,92 @@ function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version:
               </tr></tbody>
             </table>
           ) : <div className="state"><strong>No deployments</strong><span>Deploy above or via <span className="mono">podkit cloud deploy {slug}</span>.</span></div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Environment({ slug }: { slug: string }) {
+  const env = useApi(() => api.listEnv(slug), [slug]);
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [sensitive, setSensitive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const hasKey = getToken() !== "";
+  const vars = env.data?.env ?? [];
+
+  async function add() {
+    setBusy(true); setNote(null);
+    const res = await api.setEnv(slug, key.trim(), value, sensitive);
+    setBusy(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `saved ${key.trim()}` });
+      setKey(""); setValue(""); setSensitive(false);
+      env.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+    }
+  }
+
+  async function remove(k: string) {
+    setNote(null);
+    const res = await api.deleteEnv(slug, k);
+    if (res.ok) { setNote({ ok: true, text: `removed ${k}` }); env.reload(); }
+    else setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+  }
+
+  return (
+    <div className="stack">
+      <section className="panel">
+        <div className="panel-head"><h3>Environment variables</h3></div>
+        <div className="panel-body flush" style={{ padding: 0 }}>
+          {env.loading ? (
+            <div className="state">Loading…</div>
+          ) : env.error ? (
+            <div className="state"><strong>{env.error.code}</strong><span>{env.error.message}</span></div>
+          ) : vars.length === 0 ? (
+            <div className="state"><strong>No variables</strong><span>Add one below to make it available to your deployment.</span></div>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Key</th><th>Value</th><th style={{ width: 1 }} /></tr></thead>
+              <tbody>
+                {vars.map((v) => (
+                  <tr key={v.key}>
+                    <td className="mono">{v.key}</td>
+                    <td>
+                      {v.sensitive ? (
+                        <span className="row" style={{ gap: "var(--space-sm)", alignItems: "center" }}>
+                          <span className="mono faint">{"•".repeat(12)}</span>
+                          <span className="status status-building"><span className="dot" />sensitive</span>
+                        </span>
+                      ) : (
+                        <span className="mono">{v.value ?? "—"}</span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn btn-ghost" disabled={!hasKey} onClick={() => remove(v.key)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-head"><h3>Add variable</h3></div>
+        <div className="panel-body stack">
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to edit</span>}
+          <div className="field"><label>Key</label><input className="input mono" placeholder="DATABASE_URL" value={key} onChange={(e) => setKey(e.target.value)} /></div>
+          <div className="field"><label>Value</label><input className="input mono" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} /></div>
+          <label className="row" style={{ gap: "var(--space-sm)", alignItems: "center" }}>
+            <input type="checkbox" checked={sensitive} onChange={(e) => setSensitive(e.target.checked)} />
+            <span>Sensitive</span>
+          </label>
+          {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
+          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !key.trim()} onClick={add}>{busy ? "Saving…" : "Add"}</button></div>
         </div>
       </section>
     </div>

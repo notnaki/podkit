@@ -1,4 +1,12 @@
-import { pgTable, uuid, text, integer, timestamp } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  boolean,
+  timestamp,
+  unique,
+} from "drizzle-orm/pg-core";
 
 export const projects = pgTable("projects", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -16,6 +24,18 @@ export const deployments = pgTable("deployments", {
   status: text("status"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+export const projectEnv = pgTable(
+  "project_env",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").notNull(),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    sensitive: boolean("sensitive").notNull().default(false),
+  },
+  (t) => [unique().on(t.projectId, t.key)],
+);
 
 export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
