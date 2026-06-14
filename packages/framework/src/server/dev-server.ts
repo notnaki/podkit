@@ -38,7 +38,16 @@ export async function createDevServer(opts: DevServerOptions) {
     root: opts.appRoot,
     plugins: [react()],
     appType: "custom",
-    server: { middlewareMode: true },
+    // Give HMR's websocket a unique high port instead of Vite's fixed default
+    // (24678). The fixed port collides when multiple dev servers run at once
+    // (e.g. parallel tests / multiple apps), logging "Port 24678 is already in
+    // use" and causing intermittent suite flakiness. Vite treats both
+    // `hmr:false` and `hmr.port:0` as "use the default" in middlewareMode, so we
+    // pick a random high port per server (collision odds are negligible).
+    server: {
+      middlewareMode: true,
+      hmr: { port: 25000 + Math.floor(Math.random() * 20000) },
+    },
   });
 
   const clientEntry = "/app/entry-client.tsx";
