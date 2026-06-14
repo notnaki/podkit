@@ -97,6 +97,8 @@ export type Store = {
     accountId: string;
     token: string;
   }) => Promise<boolean>;
+  revokeToken: (jti: string, expiresAt: Date) => Promise<void>;
+  isTokenRevoked: (jti: string) => Promise<boolean>;
   deleteProject: (projectId: string) => Promise<void>;
   close: () => Promise<void>;
 };
@@ -177,6 +179,20 @@ export function createStore(opts: CreateStoreOptions): Store {
     `);
     await pool.query(`
       ALTER TABLE cli_auth_sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz
+    `);
+    // Token revocation list. Rows are keyed by the token's jti claim; a row's
+    // presence means the (otherwise still-valid) token must be rejected. The
+    // expires_at mirrors the token's own exp so expired rows can be GC'd later.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS revoked_tokens (
+        jti text PRIMARY KEY,
+        expires_at timestamptz NOT NULL,
+        created_at timestamp DEFAULT now()
+      )
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at
+      ON revoked_tokens(expires_at)
     `);
   }
 
@@ -536,6 +552,23 @@ export function createStore(opts: CreateStoreOptions): Store {
     return (result.rowCount ?? 0) > 0;
   }
 
+  async function revokeToken(jti: string, expiresAt: Date): Promise<void> {
+    // Idempotent: revoking the same token twice (e.g. double logout) is a no-op.
+    await pool.query(
+      `INSERT INTO revoked_tokens (jti, expires_at) VALUES ($1, $2)
+       ON CONFLICT (jti) DO NOTHING`,
+      [jti, expiresAt],
+    );
+  }
+
+  async function isTokenRevoked(jti: string): Promise<boolean> {
+    const result = await pool.query<{ jti: string }>(
+      `SELECT jti FROM revoked_tokens WHERE jti = $1 LIMIT 1`,
+      [jti],
+    );
+    return result.rows.length > 0;
+  }
+
   async function deleteProject(projectId: string): Promise<void> {
     // Delete child rows first, then the project, to respect FK-safe ordering.
     await pool.query(`DELETE FROM project_env WHERE project_id = $1`, [
@@ -576,6 +609,8 @@ export function createStore(opts: CreateStoreOptions): Store {
     getCliSessionByDeviceCode,
     getCliSessionByUserCode,
     approveCliSession,
+    revokeToken,
+    isTokenRevoked,
     deleteProject,
     close,
   };

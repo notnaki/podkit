@@ -23,6 +23,34 @@ let cloud: ReturnType<typeof createCloud> | null = null;
 let apiUrl = "";
 let gatewayUrl = "";
 
+// Best-effort, non-fatal cleanup of Docker images this suite built. Deploys
+// tag images `podkit-<slug>:v<hex>` (see host.ts), so we list images and remove
+// only those matching this suite's repository prefixes. Scoped per-prefix so a
+// sibling suite running in parallel is never touched; failures are swallowed.
+async function cleanupImages(repositoryPrefixes: string[]): Promise<void> {
+  try {
+    const { stdout } = await execFileAsync("docker", [
+      "images",
+      "--format",
+      "{{.Repository}}:{{.Tag}}",
+    ]);
+    const toRemove = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((img) => repositoryPrefixes.some((p) => img.startsWith(p)));
+    for (const tag of toRemove) {
+      try {
+        await execFileAsync("docker", ["rmi", "-f", tag]);
+      } catch {
+        // ignore: image in use, already gone, etc.
+      }
+    }
+  } catch {
+    // ignore: docker images listing failed (daemon down, no perms, etc.)
+  }
+}
+
 async function waitForPostgres(connStr: string, attempts = 60): Promise<void> {
   let lastErr: unknown = null;
   for (let i = 0; i < attempts; i++) {
@@ -153,6 +181,8 @@ afterAll(async () => {
       // ignore
     }
   }
+  // Remove images this suite built (slugs demo + secok), best-effort.
+  await cleanupImages(["podkit-demo:v", "podkit-secok:v"]);
   // Verify no leftover labeled test containers from THIS suite. Scope to this
   // suite's own containers (pg + app) so a sibling suite running in parallel
   // (with its own labeled Postgres) doesn't cause a false failure.
