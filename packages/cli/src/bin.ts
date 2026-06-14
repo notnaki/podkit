@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createRegistry } from "./registry.ts";
+import { initCommand } from "./commands/init.ts";
 import { devCommand } from "./commands/dev.ts";
 import { buildCommand } from "./commands/build.ts";
 import { startCommand } from "./commands/start.ts";
@@ -13,6 +14,7 @@ import { cloudCommand } from "./commands/cloud.ts";
 import { exitCodeFor } from "./errors.ts";
 
 const registry = createRegistry();
+registry.register("init", initCommand);
 registry.register("dev", devCommand);
 registry.register("build", buildCommand);
 registry.register("start", startCommand);
