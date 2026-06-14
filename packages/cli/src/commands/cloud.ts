@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
@@ -61,6 +63,197 @@ export function __setSpawnForTest(impl: Spawn | null): void {
   spawnImpl = impl ?? spawn;
 }
 
+// Tar-and-stream a context directory to the upload-based deploy endpoint. We
+// `tar -czf -` the context (excluding heavy/irrelevant dirs) and pipe its stdout
+// straight into an HTTP request body as application/gzip — the full tarball is
+// NEVER buffered in memory on either side. Auth headers mirror callControlPlane
+// (Bearer token, else x-podkit-key). Returns the parsed platform Envelope.
+async function deployUpload(
+  slug: string,
+  contextDir: string,
+  containerPort: number,
+  appSubpath: string | null,
+): Promise<Envelope<unknown>> {
+  const base = resolveBase();
+  let url: URL;
+  try {
+    const path =
+      `/v1/projects/${encodeURIComponent(slug)}/deploy-upload` +
+      `?containerPort=${encodeURIComponent(String(containerPort))}` +
+      (appSubpath ? `&appSubpath=${encodeURIComponent(appSubpath)}` : "");
+    url = new URL(base + path);
+  } catch {
+    return fail(new PodkitError("E_BAD_ARGS", "invalid control-plane URL"));
+  }
+
+  // Build tar argv. --exclude trims the common heavy/irrelevant paths so uploads
+  // stay small (and well under the server's size cap). -C <dir> + "." keeps the
+  // archive rooted at the context dir (no absolute paths, no leading parent).
+  const tarArgs = [
+    "-czf",
+    "-",
+    "--exclude=node_modules",
+    "--exclude=.git",
+    "--exclude=.podkit/dist",
+    "-C",
+    contextDir,
+    ".",
+  ];
+
+  const headers: Record<string, string> = {
+    "content-type": "application/gzip",
+  };
+  const token = resolveToken();
+  if (token) {
+    headers["authorization"] = `Bearer ${token}`;
+  } else {
+    headers["x-podkit-key"] = process.env.PODKIT_API_KEY ?? "";
+  }
+
+  return await new Promise<Envelope<unknown>>((resolvePromise) => {
+    let settled = false;
+    const finish = (env: Envelope<unknown>) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(env);
+    };
+
+    const tar = spawnImpl("tar", tarArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let tarStderr = "";
+    if (tar.stderr) {
+      tar.stderr.on("data", (chunk: unknown) => {
+        tarStderr += String(chunk);
+      });
+    }
+    tar.on("error", () => {
+      finish(
+        fail(
+          new PodkitError(
+            "E_BAD_STATE",
+            "could not run tar to package the context",
+            "is tar installed and on PATH?",
+          ),
+        ),
+      );
+    });
+
+    const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = requestFn(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          const status = res.statusCode ?? 0;
+          // Map server status codes to friendly, actionable CLI errors.
+          if (status === 413) {
+            finish(
+              fail(
+                new PodkitError(
+                  "E_BAD_STATE",
+                  "upload too large (server returned 413)",
+                  "exclude node_modules/.git/.podkit/dist (already excluded) or remove large files",
+                ),
+              ),
+            );
+            return;
+          }
+          if (status === 400) {
+            // The server rejected the tarball (malformed, traversal, etc.).
+            // Surface its message when present, else a generic repack hint.
+            let serverMsg = "the server rejected the uploaded tarball";
+            try {
+              const parsed = JSON.parse(raw) as Envelope<unknown>;
+              if (!parsed.ok && parsed.error?.message) {
+                serverMsg = parsed.error.message;
+              }
+            } catch {
+              // fall through to generic message
+            }
+            finish(
+              fail(
+                new PodkitError(
+                  "E_BAD_ARGS",
+                  serverMsg,
+                  "ensure the tarball is a clean gzip of your project (try repacking)",
+                ),
+              ),
+            );
+            return;
+          }
+          try {
+            finish(JSON.parse(raw) as Envelope<unknown>);
+          } catch {
+            finish(
+              fail(
+                new PodkitError(
+                  "E_NETWORK",
+                  "unexpected response from control-plane",
+                ),
+              ),
+            );
+          }
+        });
+      },
+    );
+
+    req.on("error", () => {
+      try {
+        tar.kill();
+      } catch {
+        // best-effort
+      }
+      finish(
+        fail(
+          new PodkitError(
+            "E_NETWORK",
+            "control-plane unreachable",
+            "is it running? set PODKIT_API_URL",
+          ),
+        ),
+      );
+    });
+
+    tar.on("close", (code: number | null) => {
+      if (code !== 0 && code !== null) {
+        try {
+          req.destroy();
+        } catch {
+          // best-effort
+        }
+        finish(
+          fail(
+            new PodkitError(
+              "E_BAD_STATE",
+              "tar exited with a non-zero status while packaging the context",
+              tarStderr.trim() || undefined,
+            ),
+          ),
+        );
+      }
+    });
+
+    // Pipe tar stdout -> request body. node:http chunks the stream; the server
+    // streams it to disk, so neither side buffers the whole archive.
+    if (tar.stdout) {
+      tar.stdout.pipe(req);
+    } else {
+      req.end();
+    }
+  });
+}
+
 function openInBrowser(url: string): void {
   const command =
     process.platform === "darwin"
@@ -115,7 +308,16 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug> [--contextDir=<dir>] [--containerPort=<port>] [--appSubpath=<path>], url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
+
+// `deploy` tars the context dir (excluding node_modules/.git/.podkit/dist) and
+// streams it to the control-plane, which extracts it into an isolated dir and
+// builds. A Dockerfile app deploys standalone; a podkit buildpack app (no
+// Dockerfile) needs the FULL monorepo in the tarball with the app under
+// --appSubpath (e.g. apps/myapp) — otherwise the build fails with "no
+// Dockerfile and not a podkit app".
+const DEPLOY_HINT =
+  "podkit cloud deploy <slug> [--contextDir=<dir>] [--containerPort=<port>] [--appSubpath=apps/myapp]";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -557,13 +759,28 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
       const [slug] = rest;
       if (!slug) {
         return fail(
-          new PodkitError("E_BAD_ARGS", "deploy requires a slug", AVAILABLE),
+          new PodkitError("E_BAD_ARGS", "deploy requires a slug", DEPLOY_HINT),
         );
       }
-      return await callControlPlane("POST", `/v1/projects/${slug}/deploy`, {
-        contextDir: process.cwd(),
-        containerPort: Number(process.env.PODKIT_APP_PORT ?? 3000),
-      });
+      // Upload-based deploy: tar the context dir and stream it to the
+      // control-plane (it extracts + builds). --contextDir defaults to cwd;
+      // --appSubpath is forwarded as a query param (e.g. apps/myapp).
+      const contextDir = parseFlag(rest, "--contextDir") ?? process.cwd();
+      const portStr = parseFlag(rest, "--containerPort");
+      const containerPort = portStr
+        ? Number(portStr)
+        : Number(process.env.PODKIT_APP_PORT ?? 3000);
+      if (!Number.isInteger(containerPort) || containerPort < 1) {
+        return fail(
+          new PodkitError(
+            "E_BAD_ARGS",
+            "--containerPort must be a positive integer",
+            DEPLOY_HINT,
+          ),
+        );
+      }
+      const appSubpath = parseFlag(rest, "--appSubpath");
+      return await deployUpload(slug, contextDir, containerPort, appSubpath);
     }
 
     if (subcommand === "url") {
