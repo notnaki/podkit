@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildImage, containerLogs, runContainer, stopContainer } from "../src/index.ts";
 
@@ -109,4 +109,79 @@ describe("docker runtime", () => {
     },
     60000,
   );
+});
+
+describe("runContainer resource limits (arg-level)", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  // Stub node:child_process so runContainer never touches real docker; instead we
+  // capture the argv it passes to `docker run` and assert the resource limits.
+  async function captureRunArgs(
+    opts: Parameters<typeof runContainer>[0],
+  ): Promise<string[]> {
+    const calls: { cmd: string; args: string[] }[] = [];
+
+    // Reset the module registry so the dynamic import below re-evaluates docker.ts
+    // against the freshly registered mock instead of a cached (real) module.
+    vi.resetModules();
+
+    vi.doMock("node:child_process", () => ({
+      execFile: (
+        cmd: string,
+        args: string[],
+        cb: (err: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        calls.push({ cmd, args });
+        // `docker run` returns the container id on stdout; `docker port` returns a host:port line.
+        const stdout = args[0] === "run" ? "deadbeef\n" : "0.0.0.0:54321\n";
+        cb(null, { stdout, stderr: "" });
+      },
+    }));
+
+    const { runContainer: runContainerMocked } = await import("../src/docker.ts");
+    await runContainerMocked(opts);
+
+    const runCall = calls.find((c) => c.args[0] === "run");
+    if (!runCall) {
+      throw new Error("docker run was never invoked");
+    }
+    return runCall.args;
+  }
+
+  it("includes default cpu/memory/process limits in docker run argv", async () => {
+    const args = await captureRunArgs({
+      image: "podkit-rt-test:latest",
+      name: "podkit-rt-defaults",
+      containerPort: 8080,
+    });
+
+    expect(args).toContain("--memory");
+    expect(args[args.indexOf("--memory") + 1]).toBe("512m");
+
+    expect(args).toContain("--cpus");
+    expect(args[args.indexOf("--cpus") + 1]).toBe("0.5");
+
+    expect(args).toContain("--pids-limit");
+    expect(args[args.indexOf("--pids-limit") + 1]).toBe("512");
+
+    expect(args).toContain("--ulimit");
+    expect(args[args.indexOf("--ulimit") + 1]).toBe("nofile=1024:1024");
+  });
+
+  it("lets opts.memory override the default memory limit", async () => {
+    const args = await captureRunArgs({
+      image: "podkit-rt-test:latest",
+      name: "podkit-rt-override",
+      containerPort: 8080,
+      memory: "256m",
+    });
+
+    expect(args[args.indexOf("--memory") + 1]).toBe("256m");
+    // Other defaults remain intact.
+    expect(args[args.indexOf("--cpus") + 1]).toBe("0.5");
+    expect(args[args.indexOf("--pids-limit") + 1]).toBe("512");
+  });
 });

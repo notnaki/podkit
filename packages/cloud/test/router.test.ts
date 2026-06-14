@@ -98,4 +98,27 @@ describe("readJson", () => {
     req.destroy(new Error("boom"));
     await expect(p).rejects.toThrow("boom");
   });
+
+  it("rejects with E_PAYLOAD_TOO_LARGE when the body exceeds maxSize", async () => {
+    type Listener = (arg?: unknown) => void;
+    const handlers: Record<string, Listener[]> = { data: [], end: [], error: [] };
+    const fakeReq = {
+      on(event: string, listener: Listener) {
+        (handlers[event] ??= []).push(listener);
+        return fakeReq;
+      },
+    };
+    const p = readJson(fakeReq, 10);
+    // Emit enough chunks to blow past the 10-byte cap.
+    for (let i = 0; i < 5; i++) {
+      for (const l of handlers.data!) l(Buffer.from("0123456789"));
+    }
+    for (const l of handlers.end!) l();
+    await expect(p).rejects.toMatchObject({ code: "E_PAYLOAD_TOO_LARGE" });
+  });
+
+  it("resolves the parsed JSON when the body is under maxSize", async () => {
+    const req = Readable.from([JSON.stringify({ a: 1, b: "ok" })]);
+    await expect(readJson(req, 1024)).resolves.toEqual({ a: 1, b: "ok" });
+  });
 });

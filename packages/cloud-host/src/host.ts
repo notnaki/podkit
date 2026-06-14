@@ -112,6 +112,20 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     return (await accountFromAuth(headers)) !== null;
   }
 
+  // Authorize access to a specific project. The machine API key grants full
+  // access; otherwise a valid bearer token is required AND the account must own
+  // the project. Returns a discriminant the caller maps to a 401/403 response.
+  async function authorizeProject(
+    headers: Record<string, string | string[] | undefined>,
+    project: { owner: string },
+  ): Promise<"ok" | "unauth" | "forbidden"> {
+    if (requireApiKey(headers, apiKey)) return "ok";
+    const auth = await accountFromAuth(headers);
+    if (!auth) return "unauth";
+    if (project.owner !== auth.accountId) return "forbidden";
+    return "ok";
+  }
+
   // slug -> current host port of the live container for that project.
   const routeMap = new Map<string, number>();
   // custom domain (hostname, no port) -> project slug.
@@ -149,15 +163,27 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     ),
   });
 
+  const forbidden = (): { status: number; body: unknown } => ({
+    status: 403,
+    body: fail("E_FORBIDDEN", "not project owner"),
+  });
+
   router.register("GET", "/v1/health", () => ({
     status: 200,
     body: ok({ status: "ok" }),
   }));
 
-  router.register("GET", "/v1/projects", async () => {
+  router.register("GET", "/v1/projects", async ({ headers }) => {
     // Enrich each project with its latest deployment + routed URL so the
     // console can render Vercel-style cards (domain + status) without N fetches.
-    const projects = await store.listProjects();
+    // The machine key sees everything; a user only sees projects they own.
+    const all = await store.listProjects();
+    let projects = all;
+    if (!requireApiKey(headers, apiKey)) {
+      const auth = await accountFromAuth(headers);
+      if (!auth) return unauthorized();
+      projects = all.filter((p) => p.owner === auth.accountId);
+    }
     const enriched = await Promise.all(
       projects.map(async (p) => {
         const deps = await store.listDeployments(p.id);
@@ -182,9 +208,14 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_BAD_ARGS", "slug required", "POST /v1/projects {slug}"),
       };
     }
+    // Ownership is bound to the creating account so the per-project authz checks
+    // work for real bearer clients (the CLI/console don't know their accountId).
+    // The machine API key has no account, so it may assign an owner explicitly.
+    const creator = await accountFromAuth(headers);
+    const owner = creator ? creator.accountId : b.owner ?? "";
     const project = await store.createProject({
       slug: b.slug,
-      owner: b.owner ?? "",
+      owner,
     });
     const db = await provisionDatabase({
       adminConnectionString: opts.adminConnectionString,
@@ -247,6 +278,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
 
       const version = "v" + randomBytes(4).toString("hex");
       const tag = "podkit-" + slug + ":" + version;
@@ -463,7 +497,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     return { status: 200, body: ok({ approved: true }) };
   });
 
-  router.register("GET", "/v1/projects/:slug", async ({ params }) => {
+  router.register("GET", "/v1/projects/:slug", async ({ headers, params }) => {
     const slug = params.slug!;
     const project = await store.getProjectBySlug(slug);
     if (!project) {
@@ -472,6 +506,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown project: " + slug),
       };
     }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
     const deployments = await store.listDeployments(project.id);
     const latest =
       deployments.length > 0 ? deployments[deployments.length - 1]! : null;
@@ -485,7 +522,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     };
   });
 
-  router.register("GET", "/v1/projects/:slug/deployments", async ({ params }) => {
+  router.register(
+    "GET",
+    "/v1/projects/:slug/deployments",
+    async ({ headers, params }) => {
     const slug = params.slug!;
     const project = await store.getProjectBySlug(slug);
     if (!project) {
@@ -494,6 +534,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown project: " + slug),
       };
     }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
     // store returns oldest-first; the most recent is the live/active one.
     const deployments = await store.listDeployments(project.id);
     const activeId =
@@ -511,14 +554,16 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         active: d.id === activeId,
       }));
     return { status: 200, body: ok({ deployments: items }) };
-  });
+  },
+  );
 
   router.register(
     "GET",
     "/v1/projects/:slug/logs",
     async ({ headers, params, query }) => {
-    // Runtime logs can contain secrets (injected env, tokens), so unlike the
-    // other read endpoints this one requires credentials.
+    // Runtime logs can contain secrets (injected env, tokens), so this endpoint
+    // requires credentials AND project ownership. The presence check runs first
+    // so unauthenticated callers can't probe project existence via 404s.
     if (!(await guardMutation(headers))) return unauthorized();
     const slug = params.slug!;
     const project = await store.getProjectBySlug(slug);
@@ -528,6 +573,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown project: " + slug),
       };
     }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
     // Logs for a specific deployment (?deploymentId=...) or, by default, the
     // active one (the most recent deployment for this project).
     const wanted = query.get("deploymentId");
@@ -599,6 +647,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
       const target = await store.getDeploymentById(b.deploymentId);
       if (!target || target.projectId !== project.id) {
         return {
@@ -686,6 +737,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
       const b = (body ?? {}) as {
         key?: string;
         value?: string;
@@ -715,7 +769,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
-  router.register("GET", "/v1/projects/:slug/env", async ({ params }) => {
+  router.register("GET", "/v1/projects/:slug/env", async ({ headers, params }) => {
     const slug = params.slug!;
     const project = await store.getProjectBySlug(slug);
     if (!project) {
@@ -724,6 +778,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown project: " + slug),
       };
     }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
     const items = await store.listEnv(project.id);
     return {
       status: 200,
@@ -751,6 +808,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
       await store.deleteEnv({ projectId: project.id, key });
       return { status: 200, body: ok({ deleted: key }) };
     },
@@ -769,6 +829,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
       const b = (body ?? {}) as { domain?: string };
       const domain = b.domain;
       if (
@@ -791,7 +854,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
-  router.register("GET", "/v1/projects/:slug/domains", async ({ params }) => {
+  router.register(
+    "GET",
+    "/v1/projects/:slug/domains",
+    async ({ headers, params }) => {
     const slug = params.slug!;
     const project = await store.getProjectBySlug(slug);
     if (!project) {
@@ -800,11 +866,15 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown project: " + slug),
       };
     }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
     return {
       status: 200,
       body: ok({ domains: await store.listDomains(project.id) }),
     };
-  });
+  },
+  );
 
   router.register(
     "DELETE",
@@ -820,6 +890,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           body: fail("E_NOT_FOUND", "unknown project: " + slug),
         };
       }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
       await store.deleteDomain({ projectId: project.id, domain });
       domainMap.delete(domain);
       return { status: 200, body: ok({ deleted: domain }) };
@@ -913,11 +986,11 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         });
         sendJson(res, r.status, r.body);
       } catch (err) {
-        sendJson(
-          res,
-          500,
-          fail("E_UNKNOWN", err instanceof Error ? err.message : String(err)),
+        console.error(
+          "API error:",
+          err instanceof Error ? err.stack : String(err),
         );
+        sendJson(res, 500, fail("E_UNKNOWN", "internal server error"));
       }
     },
   );

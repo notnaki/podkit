@@ -15,7 +15,7 @@ export type Store = {
   >;
   getProjectBySlug: (
     slug: string,
-  ) => Promise<{ id: string; slug: string } | null>;
+  ) => Promise<{ id: string; slug: string; owner: string } | null>;
   recordDeployment: (input: {
     projectId: string;
     version: string;
@@ -201,14 +201,18 @@ export function createStore(opts: CreateStoreOptions): Store {
 
   async function getProjectBySlug(
     slug: string,
-  ): Promise<{ id: string; slug: string } | null> {
-    const result = await pool.query<{ id: string; slug: string }>(
-      `SELECT id, slug FROM projects WHERE slug = $1 LIMIT 1`,
+  ): Promise<{ id: string; slug: string; owner: string } | null> {
+    const result = await pool.query<{
+      id: string;
+      slug: string;
+      owner: string | null;
+    }>(
+      `SELECT id, slug, owner FROM projects WHERE slug = $1 LIMIT 1`,
       [slug],
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { id: row.id, slug: row.slug };
+    return { id: row.id, slug: row.slug, owner: row.owner ?? "" };
   }
 
   async function recordDeployment(input: {

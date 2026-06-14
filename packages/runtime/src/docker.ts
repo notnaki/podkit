@@ -17,6 +17,10 @@ export interface RunContainerOptions {
   name: string;
   containerPort: number;
   env?: Record<string, string>;
+  memory?: string;
+  cpus?: string;
+  pidsLimit?: number;
+  nofile?: number;
 }
 
 export interface RunContainerResult {
@@ -35,8 +39,12 @@ export async function buildImage(opts: BuildImageOptions): Promise<BuildImageRes
 
 /**
  * Run a container detached and publish its port to a random host port.
- * Runs `docker run -d --rm --label podkit.test=1 --name <name> -p 0:<containerPort> [-e K=V ...] <image>`
- * then reads the assigned host port via `docker port <name> <containerPort>`.
+ * Runs `docker run -d --rm --label podkit.test=1 --name <name> -p 0:<containerPort>
+ * --memory <memory> --cpus <cpus> --pids-limit <pidsLimit> --ulimit nofile=<nofile>:<nofile>
+ * [-e K=V ...] <image>` then reads the assigned host port via `docker port <name> <containerPort>`.
+ *
+ * Resource limits default to memory=512m, cpus=0.5, pidsLimit=512, nofile=1024 to contain
+ * fork bombs and memory exhaustion DoS from tenant containers against the host and co-tenants.
  */
 export async function runContainer(opts: RunContainerOptions): Promise<RunContainerResult> {
   const args = [
@@ -49,6 +57,14 @@ export async function runContainer(opts: RunContainerOptions): Promise<RunContai
     opts.name,
     "-p",
     `0:${opts.containerPort}`,
+    "--memory",
+    opts.memory ?? "512m",
+    "--cpus",
+    opts.cpus ?? "0.5",
+    "--pids-limit",
+    String(opts.pidsLimit ?? 512),
+    "--ulimit",
+    `nofile=${opts.nofile ?? 1024}:${opts.nofile ?? 1024}`,
   ];
 
   if (opts.env) {

@@ -226,7 +226,9 @@ describe("cloud-host deployments history + rollback (real Docker + Postgres)", (
       await waitForBody("served-by-green");
 
       // 4. List deployment history: newest-first, green is active.
-      const histRes = await fetch(apiUrl + "/v1/projects/rb/deployments");
+      const histRes = await fetch(apiUrl + "/v1/projects/rb/deployments", {
+        headers: { "x-podkit-key": "k" },
+      });
       const histBody = await histRes.json();
       expect(histBody.ok).toBe(true);
       const items = histBody.data.deployments as Array<{
@@ -266,7 +268,9 @@ describe("cloud-host deployments history + rollback (real Docker + Postgres)", (
 
       // 7. History now has three rows; the newest is a rollback to blue.
       const hist2 = await (
-        await fetch(apiUrl + "/v1/projects/rb/deployments")
+        await fetch(apiUrl + "/v1/projects/rb/deployments", {
+          headers: { "x-podkit-key": "k" },
+        })
       ).json();
       const items2 = hist2.data.deployments as Array<{
         version: string;
