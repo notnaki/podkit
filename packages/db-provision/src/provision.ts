@@ -1,4 +1,5 @@
 import { Client } from "pg";
+import { randomBytes } from "node:crypto";
 
 /**
  * Sanitize a free-form project slug into a safe Postgres database identifier.
@@ -25,6 +26,15 @@ export function sanitizeSlug(slug: string): string {
 }
 
 /**
+ * Derive the per-project login role name from a (already-sanitized) database
+ * name. `<database>` is `proj_<body>` (<= 55 chars), so `<database>_app` stays
+ * within Postgres's 63-byte identifier limit and remains [a-z0-9_].
+ */
+export function roleNameForDatabase(database: string): string {
+  return `${database}_app`;
+}
+
+/**
  * Swap the database path of a Postgres connection string, preserving creds,
  * host, port, and query params. Used to point admin creds at a new database.
  */
@@ -35,50 +45,117 @@ function withDatabase(connectionString: string, database: string): string {
 }
 
 /**
- * Provision a managed Postgres database for a project.
+ * Build a connection string that uses the per-project role + password and
+ * points at the project database, keeping the admin URL's host/port/params.
+ */
+function withRoleAndDatabase(
+  connectionString: string,
+  role: string,
+  password: string,
+  database: string,
+): string {
+  const url = new URL(connectionString);
+  // role is [a-z0-9_] and password is hex, so both are URL-safe as-is.
+  url.username = role;
+  url.password = password;
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+/**
+ * Provision a managed Postgres database for a project, with a **scoped
+ * per-project login role** — NOT the admin/superuser credentials.
  *
- * MVP simplification: this reuses the admin role for the new database rather
- * than minting a per-project role/credentials. Per-project roles (with scoped
- * privileges and rotated secrets) can be layered on later — the returned
- * connectionString simply carries the admin creds pointed at the new DB.
+ * Isolation guarantees:
+ * - the role is a plain LOGIN role (no SUPERUSER / CREATEDB / CREATEROLE);
+ * - it owns its own database + `public` schema (full control within it);
+ * - PUBLIC's default CONNECT on the database is revoked, so the role cannot be
+ *   used to reach any *other* project's database, and other roles cannot reach
+ *   this one. The returned connectionString carries these scoped creds.
+ *
+ * Re-provisioning the same slug rotates the role's password (and returns the
+ * new connection string), staying idempotent for the database + role objects.
  */
 export async function provisionDatabase(opts: {
   adminConnectionString: string;
   slug: string;
-}): Promise<{ database: string; connectionString: string }> {
+}): Promise<{ database: string; role: string; connectionString: string }> {
   const database = sanitizeSlug(opts.slug);
+  const role = roleNameForDatabase(database);
+  const password = randomBytes(24).toString("hex");
+
   const admin = new Client({ connectionString: opts.adminConnectionString });
   await admin.connect();
   try {
-    // CREATE DATABASE cannot run in a transaction and has no IF NOT EXISTS,
-    // so check pg_database first to stay idempotent.
+    // 1. Create the database (idempotent; CREATE DATABASE cannot run in a txn
+    //    and has no IF NOT EXISTS, so check pg_database first).
     const existing = await admin.query(
       "SELECT 1 FROM pg_database WHERE datname = $1",
       [database],
     );
     if (existing.rowCount === 0) {
-      // Identifier is validated by sanitizeSlug to [a-z0-9_], so quoting is
-      // safe; parameters are not allowed in CREATE DATABASE.
+      // Identifiers are validated to [a-z0-9_], so quoting is safe; parameters
+      // are not allowed in CREATE DATABASE / CREATE ROLE.
       await admin.query(`CREATE DATABASE "${database}"`);
     }
+
+    // 2. Create (or rotate the password of) the per-project login role. A bare
+    //    CREATE ROLE is non-superuser, non-createdb, non-createrole by default.
+    const roleExists = await admin.query(
+      "SELECT 1 FROM pg_roles WHERE rolname = $1",
+      [role],
+    );
+    if (roleExists.rowCount === 0) {
+      await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);
+    } else {
+      await admin.query(`ALTER ROLE "${role}" WITH LOGIN PASSWORD '${password}'`);
+    }
+
+    // 3. Lock the database down to this role: revoke the implicit PUBLIC
+    //    CONNECT, grant CONNECT to the role, and hand it ownership.
+    await admin.query(`REVOKE CONNECT ON DATABASE "${database}" FROM PUBLIC`);
+    await admin.query(`GRANT CONNECT ON DATABASE "${database}" TO "${role}"`);
+    await admin.query(`ALTER DATABASE "${database}" OWNER TO "${role}"`);
   } finally {
     await admin.end();
   }
 
+  // 4. Schema-level grants must run while connected to the new database. Give
+  //    the role ownership of `public` so it can create tables (PG15+ no longer
+  //    grants PUBLIC create on public). Admin connects as superuser, which
+  //    bypasses the CONNECT revoke above.
+  const adminInDb = new Client({
+    connectionString: withDatabase(opts.adminConnectionString, database),
+  });
+  await adminInDb.connect();
+  try {
+    await adminInDb.query(`ALTER SCHEMA public OWNER TO "${role}"`);
+    await adminInDb.query(`GRANT ALL ON SCHEMA public TO "${role}"`);
+  } finally {
+    await adminInDb.end();
+  }
+
   return {
     database,
-    connectionString: withDatabase(opts.adminConnectionString, database),
+    role,
+    connectionString: withRoleAndDatabase(
+      opts.adminConnectionString,
+      role,
+      password,
+      database,
+    ),
   };
 }
 
 /**
- * Drop a managed database. Terminates any open connections first, since
- * DROP DATABASE fails while sessions are attached. Intended for test cleanup
- * and project teardown.
+ * Drop a managed database (and optionally its per-project role). Terminates any
+ * open connections first, since DROP DATABASE fails while sessions are attached.
+ * Intended for test cleanup and project teardown.
  */
 export async function dropDatabase(opts: {
   adminConnectionString: string;
   database: string;
+  role?: string;
 }): Promise<void> {
   const admin = new Client({ connectionString: opts.adminConnectionString });
   await admin.connect();
@@ -88,6 +165,11 @@ export async function dropDatabase(opts: {
       [opts.database],
     );
     await admin.query(`DROP DATABASE IF EXISTS "${opts.database}"`);
+    if (opts.role) {
+      // The role no longer owns the dropped database, so it can be removed.
+      // Identifier is server-derived ([a-z0-9_]), so quoting is safe.
+      await admin.query(`DROP ROLE IF EXISTS "${opts.role}"`);
+    }
   } finally {
     await admin.end();
   }
