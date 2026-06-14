@@ -58,6 +58,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Console UI** (PR #27): surfaces #26 in the cloud-console — **Metrics tab**, **Database tab** (read-only SQL console), **log filters** (lines/since), and copy-to-clipboard for URLs + connection string.
 - **Production app bundling** (PR #28): tenant containers no longer run the Vite dev server. `@podkit/framework` `buildApp()` (Vite client build w/ hashed assets + Vite SSR build of route modules + manifest) and a **Vite-free** `createProdServer()` (imports pre-compiled SSR modules, serves immutable-cached client assets). CLI `podkit build`/`start`; buildpack Dockerfile now `RUN`s build + `CMD`s `start`. (Edge/cold-start optimization still open.)
 - **Reap superseded containers** (PR #29): deploy/rollback now stops the container it replaced (after the routeMap cutover, so no dropped traffic) instead of leaking it until shutdown.
+- **Database branching** (PR #30, Supabase-class): isolated per-project Postgres branches (copy-on-create via `CREATE DATABASE … WITH TEMPLATE`), each with its own scoped non-superuser role; `project_branches` table; ownership-gated `POST/GET/DELETE /v1/projects/:slug/branches`; `podkit cloud branches`; console Branches panel in the Database tab.
 
 ## 📋 To do — cloud hardening (toward production)
 
@@ -66,7 +67,8 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 3. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains. *(Needs public DNS/reachability — hard to test locally.)*
 4. **Standalone buildpack** — support apps outside the monorepo (published packages).
 5. **Cold-start / edge** — prod bundling shipped (#28); next is faster container cold-start + edge runtime.
-6. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
+6. **Telemetry-at-scale, self-host packaging (IaC), branch→preview-deploy wiring** (DB branching shipped in #30; wiring a branch to a preview deployment is the next step).
+7. **CI hygiene** — the full Docker suite has an intermittent flake (port-24678 WebSocket collision in the framework dev-server test + teardown races under heavy parallel load); pin/limit vitest concurrency for Docker suites and fix the fixed-port WS.
 
 ---
 
