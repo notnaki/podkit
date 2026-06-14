@@ -21,6 +21,8 @@ export const deployments = pgTable("deployments", {
   version: text("version"),
   containerId: text("container_id"),
   hostPort: integer("host_port"),
+  containerPort: integer("container_port"),
+  kind: text("kind").default("deploy"),
   status: text("status"),
   createdAt: timestamp("created_at").defaultNow(),
 });

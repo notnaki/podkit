@@ -71,6 +71,14 @@ export interface Project {
   status?: string | null;
 }
 export interface Deployment { id?: string; version: string; hostPort?: number; status?: string }
+export interface DeploymentHistoryItem {
+  id: string;
+  version: string;
+  status: string | null;
+  kind: string | null;
+  createdAt: string | null;
+  active: boolean;
+}
 export interface ProjectDetail { project: Project; latest: Deployment | null; url: string | null }
 export interface CreatedProject { project: Project; database?: string; connectionString?: string }
 export interface EnvVar { key: string; sensitive: boolean; value: string | null }
@@ -90,6 +98,17 @@ export const api = {
     call<CreatedProject>("POST", "/v1/projects", { slug, owner }),
   getProject: (slug: string) =>
     call<ProjectDetail>("GET", `/v1/projects/${encodeURIComponent(slug)}`),
+  listDeployments: (slug: string) =>
+    call<{ deployments: DeploymentHistoryItem[] }>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/deployments`,
+    ),
+  rollback: (slug: string, deploymentId: string) =>
+    call<{ version: string; hostPort: number; url: string; rolledBackTo: string }>(
+      "POST",
+      `/v1/projects/${encodeURIComponent(slug)}/rollback`,
+      { deploymentId },
+    ),
   deployProject: (slug: string, contextDir: string, containerPort: number) =>
     call<{ version: string; hostPort: number; url: string }>(
       "POST",

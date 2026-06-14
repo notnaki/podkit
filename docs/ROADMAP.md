@@ -30,24 +30,33 @@ Seven packages, ~127 tests, clean typecheck. Everything runs **locally** (embedd
 
 ---
 
-## ✅ Done — the real cloud platform (Docker hosting, PR #11)
+## ✅ Done — the real cloud platform (Docker hosting, PRs #11–#17)
 
-The hosted multi-tenant cloud, built on real Docker and tested on a real machine:
-- **`@podkit/runtime`** — builds + runs app **Docker containers**
-- **`@podkit/cloud-store`** — control-plane persistence in **real Postgres**
-- **`@podkit/gateway`** — reverse-proxy edge (`/_p/<project>` → container)
+The hosted multi-tenant cloud, built on real Docker and tested on a real machine. **213 tests on `main`, 13 packages + 2 apps.**
+- **`@podkit/runtime`** — builds + runs app **Docker containers**; **zero-config buildpack** (`isPodkitApp`/`generatePodkitDockerfile`/`buildPodkitApp` — push a podkit app, no Dockerfile, it runs) (PR #14)
+- **`@podkit/cloud-store`** — control-plane persistence in **real Postgres** (raw parameterized SQL): projects, deployments, accounts, cli_auth_sessions, project_env, project_domains
+- **`@podkit/gateway`** — reverse-proxy edge: `/_p/<project>` path routing **and Host-header → custom-domain routing** (PR #17)
 - **`@podkit/db-provision`** — **managed Postgres-per-project** (Supabase part)
-- **`@podkit/cloud-host`** — `createCloud`: create project → provision DB → build+run container → routed public URL (API-key guarded; full loop proven against real Docker+Postgres)
-- **`infra/docker-compose.yml`** — boots Postgres + control-plane (`pnpm cloud:up`); compose-tested
-- **Clients** — dashboard **Projects** page + **`podkit cloud`** CLI
+- **`@podkit/cloud-host`** — `createCloud`: create project → provision DB → build+run container → routed public URL; **account auth + CLI device flow**, **env injection at deploy**, **custom domains**; serves the cloud-console as a same-origin SPA. API-key + user-Bearer guarded; full loop proven against real Docker+Postgres.
+- **`infra/docker-compose.yml`** — boots Postgres + control-plane (`pnpm cloud:up`); compose-tested. Control-plane image builds the console and sets `PODKIT_CONSOLE_DIR`.
+- **Consoles** — `apps/cloud-console` (multi-tenant, Vercel-style, **served from the cloud on :8080**, PR #15) + `apps/dashboard` (per-project). `podkit cloud` CLI: `projects|create|deploy|url|login|logout|whoami|env|domains`.
+
+### Cloud feature waves landed
+- **Cloud auth + zero-config deploy** (PR #14): accounts (email/scrypt), `podkit cloud login` browser **device flow** (→ `~/.podkit/auth.json` 0600 → Bearer), console **login gate** + `/#/cli` authorize; security-hardened (cli-session 10m expiry + single-use approve, anti-phishing, appSubpath validated, 8-char password floor). Zero-config buildpack wired into deploy.
+- **Console served from the cloud** (PR #15): control-plane serves the built cloud-console as a same-origin SPA on :8080 (API under /v1, gateway :8090). Vite dev proxy keeps standalone dev (:5190) working.
+- **Env vars** (PR #16): project_env (sensitive/plain), `POST/GET/DELETE /v1/projects/:slug/env` (masked on read), injected into the container at deploy, console Environment tab + `podkit cloud env set|list|rm`.
+- **Custom domains** (PR #17): project_domains, gateway resolves by Host header (domain→slug→container), console Domains tab + `podkit cloud domains add|list|rm`.
 
 ## 📋 To do — cloud hardening (toward production)
 
 1. **Per-project DB scoped roles** — currently reuses admin creds (MVP); add per-tenant role + least-privilege.
-2. **Deploy-in-compose e2e** — control-plane spawning app containers via the mounted Docker socket, end-to-end.
-3. **Multi-tenant operator auth** — real accounts for the control-plane (vs the shared API key) + dashboard auth; point the dashboard at cloud-host.
-4. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
-5. **Domains/TLS, DB branching, telemetry-at-scale, self-host packaging (IaC).**
+2. **Deployments history + rollback in the console** — `store.listDeployments` records every deploy; surface the full history + one-click rollback (only the latest is shown today).
+3. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
+4. **Secrets-at-rest encryption** — env values marked sensitive are stored plaintext in control-plane Postgres; encrypt at rest.
+5. **Domain ownership verification + TLS** — DNS TXT challenge to prove domain ownership, then automatic cert issuance (ACME) for custom domains.
+6. **Standalone buildpack** — buildpack assumes the monorepo; support deploying podkit apps that depend on published packages.
+7. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
+8. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
 

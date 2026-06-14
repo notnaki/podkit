@@ -75,7 +75,7 @@ export function Project({ slug }: { slug: string }) {
             </section>
           </div>
         ) : tab === "Deployments" ? (
-          <Deployments slug={slug} dep={dep} url={url} reload={detail.reload} />
+          <Deployments slug={slug} url={url} reload={detail.reload} />
         ) : tab === "Storage" ? (
           <section className="panel">
             <div className="panel-head"><h3>Database</h3><span className="status status-ready"><span className="dot" />Postgres</span></div>
@@ -108,17 +108,37 @@ export function Project({ slug }: { slug: string }) {
   );
 }
 
-function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version: string; status?: string } | null; url: string | null; reload: () => void }) {
+function fmtTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function Deployments({ slug, url, reload }: { slug: string; url: string | null; reload: () => void }) {
+  const history = useApi(() => api.listDeployments(slug), [slug]);
   const [busy, setBusy] = useState(false);
   const [ctx, setCtx] = useState("");
+  const [rolling, setRolling] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const hasKey = getToken() !== "";
+  const list = history.data?.deployments ?? [];
 
   async function deploy() {
     setBusy(true); setNote(null);
     const res = await api.deployProject(slug, ctx.trim(), 3000);
     setBusy(false);
-    if (res.ok) { setNote({ ok: true, text: `deployed ${res.data.version}` }); reload(); }
+    if (res.ok) { setNote({ ok: true, text: `deployed ${res.data.version}` }); setCtx(""); history.reload(); reload(); }
+    else setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+  }
+
+  async function rollback(id: string, version: string) {
+    setRolling(id); setNote(null);
+    const res = await api.rollback(slug, id);
+    setRolling(null);
+    if (res.ok) { setNote({ ok: true, text: `rolled back to ${version}` }); history.reload(); reload(); }
     else setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
   }
 
@@ -134,19 +154,39 @@ function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version:
         </div>
       </section>
       <section className="panel">
-        <div className="panel-head"><h3>Production</h3></div>
-        <div className="panel-body flush" style={{ padding: 0 }}>
-          {dep ? (
-            <table className="table">
-              <thead><tr><th>Version</th><th>Status</th><th>URL</th></tr></thead>
-              <tbody><tr>
-                <td className="mono">{dep.version}</td>
-                <td><span className={dep.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{dep.status === "running" ? "Ready" : dep.status}</span></td>
-                <td>{url ? <a className="mono" style={{ color: "var(--link)" }} href={url} target="_blank" rel="noreferrer">{url.replace(/^https?:\/\//, "")}</a> : "—"}</td>
-              </tr></tbody>
-            </table>
-          ) : <div className="state"><strong>No deployments</strong><span>Deploy above or via <span className="mono">podkit cloud deploy {slug}</span>.</span></div>}
+        <div className="panel-head">
+          <h3>Deployment history</h3>
+          {url && <a className="mono muted" href={url} target="_blank" rel="noreferrer" style={{ fontSize: "var(--t-sm)" }}>{url.replace(/^https?:\/\//, "")} ↗</a>}
         </div>
+        <div className="panel-body flush" style={{ padding: 0 }}>
+          {history.loading ? (
+            <div className="state">Loading…</div>
+          ) : history.error ? (
+            <div className="state"><strong>{history.error.code}</strong><span>{history.error.message}</span></div>
+          ) : list.length === 0 ? (
+            <div className="state"><strong>No deployments</strong><span>Deploy above or via <span className="mono">podkit cloud deploy {slug}</span>.</span></div>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Version</th><th>Source</th><th>Status</th><th>Created</th><th style={{ width: 1 }} /></tr></thead>
+              <tbody>
+                {list.map((d) => (
+                  <tr key={d.id}>
+                    <td className="mono">{d.version}</td>
+                    <td>{d.kind === "rollback" ? <span className="status status-building"><span className="dot" />rollback</span> : <span className="faint">deploy</span>}</td>
+                    <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "—")}</span></td>
+                    <td className="faint mono" style={{ fontSize: "var(--t-sm)" }}>{fmtTime(d.createdAt)}</td>
+                    <td style={{ textAlign: "right" }}>
+                      {d.active
+                        ? <span className="status status-ready"><span className="dot" />Current</span>
+                        : <button className="btn btn-ghost" disabled={!hasKey || rolling !== null} onClick={() => rollback(d.id, d.version)}>{rolling === d.id ? "Rolling back…" : "Rollback"}</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div className="panel-foot">Rolling back re-runs a previous build and instantly reroutes the URL to it.</div>
       </section>
     </div>
   );

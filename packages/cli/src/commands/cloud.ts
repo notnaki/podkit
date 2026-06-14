@@ -86,7 +86,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, env, domains, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, deployments <slug>, rollback <slug> <deploymentId>, env, domains, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -323,6 +323,37 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
         );
       }
       return await callControlPlane("GET", `/v1/projects/${slug}`);
+    }
+
+    if (subcommand === "deployments") {
+      const [slug] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "deployments requires a slug", AVAILABLE),
+        );
+      }
+      return await callControlPlane("GET", `/v1/projects/${slug}/deployments`);
+    }
+
+    if (subcommand === "rollback") {
+      const [slug, deploymentId] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "rollback requires a slug", AVAILABLE),
+        );
+      }
+      if (!deploymentId) {
+        return fail(
+          new PodkitError(
+            "E_BAD_ARGS",
+            "rollback requires a deploymentId",
+            "list ids with: podkit cloud deployments <slug>",
+          ),
+        );
+      }
+      return await callControlPlane("POST", `/v1/projects/${slug}/rollback`, {
+        deploymentId,
+      });
     }
 
     if (subcommand === "env") {
