@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
 import type { Project } from "../api/client.ts";
-import { useApi } from "../lib/useApi.ts";
+import { useApi, relativeTime } from "../lib/useApi.ts";
 
 function statusClass(status?: string | null) {
   if (status === "running" || status === "ready") return "status status-ready";
@@ -56,6 +56,7 @@ export function Projects() {
 }
 
 function ProjectCard({ p }: { p: Project }) {
+  const deployed = p.lastDeployedAt ? relativeTime(new Date(p.lastDeployedAt).getTime(), Date.now()) : null;
   return (
     <a className="project-card" href={`#/p/${encodeURIComponent(p.slug)}`}>
       <div className="pc-head">
@@ -71,6 +72,7 @@ function ProjectCard({ p }: { p: Project }) {
           {p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
         </span>
         {p.version && <span className="mono faint" style={{ fontSize: "var(--t-xs)" }}>{p.version}</span>}
+        {deployed && <span className="faint mono" style={{ fontSize: "var(--t-xs)" }}>{deployed}</span>}
       </div>
     </a>
   );

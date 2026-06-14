@@ -16,7 +16,12 @@ import {
   buildPodkitApp,
 } from "@podkit/runtime";
 import { createGateway } from "@podkit/gateway";
-import { provisionDatabase } from "@podkit/db-provision";
+import {
+  provisionDatabase,
+  dropDatabase,
+  sanitizeSlug,
+  roleNameForDatabase,
+} from "@podkit/db-provision";
 import {
   requireApiKey,
   createRouter,
@@ -192,6 +197,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           ...p,
           version: latest ? latest.version : null,
           status: latest ? latest.status : null,
+          lastDeployedAt: latest ? (latest.createdAt ?? null) : null,
           url: latest ? gatewayUrl + "/_p/" + p.slug + "/" : null,
         };
       }),
@@ -521,6 +527,60 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }),
     };
   });
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+
+      // Stop the active container (the most recent deployment) if any. Best
+      // effort: a pruned/already-stopped container must not block teardown.
+      const deployments = await store.listDeployments(project.id);
+      const active = deployments[deployments.length - 1];
+      if (active && active.containerId) {
+        try {
+          await stopContainer(active.containerId);
+        } catch {
+          // Ignore: container may already be gone.
+        }
+      }
+
+      // Drop the project's database + role. Best effort so a missing/already
+      // dropped database does not leave the control-plane row orphaned.
+      const database = sanitizeSlug(slug);
+      try {
+        await dropDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          database,
+          role: roleNameForDatabase(database),
+        });
+      } catch {
+        // Ignore: database may have never been provisioned or already dropped.
+      }
+
+      // Drop in-memory routing state for this project.
+      routeMap.delete(slug);
+      for (const { domain } of await store.listDomains(project.id)) {
+        domainMap.delete(domain);
+      }
+
+      await store.deleteProject(project.id);
+
+      return { status: 200, body: ok({ deleted: slug }) };
+    },
+  );
 
   router.register(
     "GET",

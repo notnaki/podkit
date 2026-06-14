@@ -8,6 +8,7 @@ import { docsCommand } from "./commands/docs.ts";
 import { logsCommand } from "./commands/logs.ts";
 import { analyticsCommand } from "./commands/analytics.ts";
 import { cloudCommand } from "./commands/cloud.ts";
+import { exitCodeFor } from "./errors.ts";
 
 const registry = createRegistry();
 registry.register("dev", devCommand);
@@ -21,16 +22,21 @@ registry.register("cloud", cloudCommand);
 
 const argv = process.argv.slice(2);
 const json = argv.includes("--json");
-const cleaned = argv.filter((a) => a !== "--json");
+const quiet = argv.includes("--quiet");
+const cleaned = argv.filter((a) => a !== "--json" && a !== "--quiet");
 
 const result = await registry.dispatch(cleaned);
 
-if (json) {
-  console.log(JSON.stringify(result));
-} else if (result.ok) {
-  console.log("ready:", JSON.stringify(result.data));
-} else {
-  console.error(`error[${result.error.code}]: ${result.error.message}${result.error.hint ? `\n  hint: ${result.error.hint}` : ""}`);
+// stdout (json block + success line) is suppressed when quiet; stderr error line always prints.
+if (!quiet) {
+  if (json) {
+    console.log(JSON.stringify(result));
+  } else if (result.ok) {
+    console.log("ready:", JSON.stringify(result.data));
+  }
 }
 
-if (!result.ok) process.exitCode = 1;
+if (!result.ok) {
+  console.error(`error[${result.error.code}]: ${result.error.message}${result.error.hint ? `\n  hint: ${result.error.hint}` : ""}`);
+  process.exitCode = exitCodeFor(result.error.code);
+}

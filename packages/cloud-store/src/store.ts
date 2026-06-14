@@ -95,6 +95,7 @@ export type Store = {
     accountId: string;
     token: string;
   }) => Promise<boolean>;
+  deleteProject: (projectId: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -522,6 +523,20 @@ export function createStore(opts: CreateStoreOptions): Store {
     return (result.rowCount ?? 0) > 0;
   }
 
+  async function deleteProject(projectId: string): Promise<void> {
+    // Delete child rows first, then the project, to respect FK-safe ordering.
+    await pool.query(`DELETE FROM project_env WHERE project_id = $1`, [
+      projectId,
+    ]);
+    await pool.query(`DELETE FROM project_domains WHERE project_id = $1`, [
+      projectId,
+    ]);
+    await pool.query(`DELETE FROM deployments WHERE project_id = $1`, [
+      projectId,
+    ]);
+    await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
+  }
+
   async function close(): Promise<void> {
     await pool.end();
   }
@@ -548,6 +563,7 @@ export function createStore(opts: CreateStoreOptions): Store {
     getCliSessionByDeviceCode,
     getCliSessionByUserCode,
     approveCliSession,
+    deleteProject,
     close,
   };
 }

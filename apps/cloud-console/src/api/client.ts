@@ -69,6 +69,7 @@ export interface Project {
   url?: string | null;
   version?: string | null;
   status?: string | null;
+  lastDeployedAt?: string | null;
 }
 export interface Deployment { id?: string; version: string; hostPort?: number; status?: string }
 export interface DeploymentHistoryItem {
@@ -98,6 +99,11 @@ export const api = {
     call<CreatedProject>("POST", "/v1/projects", { slug, owner }),
   getProject: (slug: string) =>
     call<ProjectDetail>("GET", `/v1/projects/${encodeURIComponent(slug)}`),
+  deleteProject: (slug: string) =>
+    call<{ deleted: string }>(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}`,
+    ),
   listDeployments: (slug: string) =>
     call<{ deployments: DeploymentHistoryItem[] }>(
       "GET",
