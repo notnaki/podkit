@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
@@ -114,13 +115,16 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
 
 const DOMAINS_HINT =
   "podkit cloud domains add <slug> <domain> | list <slug> | rm <slug> <domain>";
+
+const BRANCHES_HINT =
+  "podkit cloud branches list <slug> | create <slug> <name> | rm <slug> <name>";
 
 async function domainsCommand(rest: string[]): Promise<Envelope<unknown>> {
   const [action, ...domainsRest] = rest;
@@ -175,6 +179,128 @@ async function domainsCommand(rest: string[]): Promise<Envelope<unknown>> {
       "E_BAD_ARGS",
       action ? `Unknown domains action: ${action}` : "domains requires an action",
       DOMAINS_HINT,
+    ),
+  );
+}
+
+// Minimal interactive yes/no prompt for destructive actions. Returns true only
+// on an explicit "y"/"yes". Defaults to false (declines) on EOF/empty input, so
+// piping `echo "" |` or a closed stdin is treated as "no" — fail safe.
+function confirm(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(question, (answer) => {
+      rl.close();
+      const normalized = answer.trim().toLowerCase();
+      resolve(normalized === "y" || normalized === "yes");
+    });
+  });
+}
+
+async function branchesCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [action, ...branchesRest] = rest;
+
+  if (action === "list") {
+    const [slug] = branchesRest;
+    if (!slug) {
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          "branches list requires a slug",
+          BRANCHES_HINT,
+        ),
+      );
+    }
+    const res = await callControlPlane("GET", `/v1/projects/${slug}/branches`);
+    if (res.ok) {
+      const data = res.data as any;
+      const list = Array.isArray(data?.branches) ? data.branches : [];
+      const rows: Record<string, string>[] = list.map((b: any) => ({
+        name: String(b?.name ?? ""),
+        database: String(b?.database ?? ""),
+        createdAt: String(b?.createdAt ?? ""),
+      }));
+      return ok(formatTable(rows));
+    }
+    return res;
+  }
+
+  if (action === "create") {
+    const [slug, name] = branchesRest;
+    if (!slug) {
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          "branches create requires a slug",
+          BRANCHES_HINT,
+        ),
+      );
+    }
+    if (!name) {
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          "branches create requires a branch name",
+          BRANCHES_HINT,
+        ),
+      );
+    }
+    const res = await callControlPlane(
+      "POST",
+      `/v1/projects/${slug}/branches`,
+      { name },
+    );
+    if (res.ok) {
+      const data = res.data as any;
+      return ok({
+        name: data?.branch?.name ?? name,
+        database: data?.branch?.database ?? "",
+        // One-time scoped connection string for the new branch — put it in .env.
+        connectionString: data?.connectionString ?? "",
+      });
+    }
+    return res;
+  }
+
+  if (action === "rm") {
+    const [slug, name] = branchesRest;
+    if (!slug) {
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          "branches rm requires a slug",
+          BRANCHES_HINT,
+        ),
+      );
+    }
+    if (!name) {
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          "branches rm requires a branch name",
+          BRANCHES_HINT,
+        ),
+      );
+    }
+    const confirmed = await confirm(
+      `Delete branch "${name}" of project "${slug}"? This drops its database. [y/N] `,
+    );
+    if (!confirmed) {
+      return ok({ status: "aborted" });
+    }
+    return await callControlPlane(
+      "DELETE",
+      `/v1/projects/${slug}/branches/${name}`,
+    );
+  }
+
+  return fail(
+    new PodkitError(
+      "E_BAD_ARGS",
+      action
+        ? `Unknown branches action: ${action}`
+        : "branches requires an action",
+      BRANCHES_HINT,
     ),
   );
 }
@@ -438,6 +564,10 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
 
     if (subcommand === "domains") {
       return await domainsCommand(rest);
+    }
+
+    if (subcommand === "branches") {
+      return await branchesCommand(rest);
     }
 
     if (subcommand === "login") {

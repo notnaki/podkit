@@ -21,6 +21,8 @@ import { createMetricsRegistry } from "@podkit/telemetry";
 import {
   provisionDatabase,
   dropDatabase,
+  createBranchDatabase,
+  dropBranchDatabase,
   sanitizeSlug,
   roleNameForDatabase,
 } from "@podkit/db-provision";
@@ -112,6 +114,13 @@ function isSelectOnly(sql: string): boolean {
   const withoutTrailing = trimmed.replace(/;\s*$/, "");
   if (withoutTrailing.includes(";")) return false;
   return true;
+}
+
+// A branch name is a short lowercase identifier ([a-z0-9_], starting with an
+// alphanumeric) that becomes part of a Postgres database + role name. We validate
+// (never sanitize) so two distinct requests can't collide on the same DB.
+function isValidBranchName(name: unknown): name is string {
+  return typeof name === "string" && /^[a-z0-9][a-z0-9_]{0,49}$/.test(name);
 }
 
 // Broad classes of system / shared directories a build context must never point
@@ -1471,6 +1480,184 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       await store.deleteDomain({ projectId: project.id, domain });
       domainMap.delete(domain);
       return { status: 200, body: ok({ deleted: domain }) };
+    },
+  );
+
+  router.register(
+    "POST",
+    "/v1/projects/:slug/branches",
+    async ({ headers, params, body }) => {
+      // Creating a branch provisions a real (scoped-role) clone DB, so it is a
+      // mutation: guard credentials, resolve the project, then enforce ownership.
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const b = (body ?? {}) as { name?: unknown };
+      if (!isValidBranchName(b.name)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid branch name",
+            "name must match ^[a-z0-9][a-z0-9_]{0,49}$ (lowercase, 1-50 chars)",
+          ),
+        };
+      }
+      const name = b.name;
+
+      // Clone the base project DB into an isolated branch DB with its own scoped
+      // non-superuser role. Never hand out the admin connection string.
+      let branchDb: { database: string; role: string; connectionString: string };
+      try {
+        branchDb = await createBranchDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          baseSlug: slug,
+          branchName: name,
+        });
+      } catch {
+        // Generic message — never leak driver internals / SQLSTATE.
+        return {
+          status: 400,
+          body: fail(
+            "E_BRANCH_FAILED",
+            "could not create the branch database",
+            "ensure the project has a base database (it is created with the project)",
+          ),
+        };
+      }
+
+      // Persist the branch (encrypted scoped URL). UNIQUE(project_id, name)
+      // makes concurrent creates of the same name race-safe: the loser gets a
+      // 400. On store failure, best-effort drop the just-created DB so we don't
+      // orphan a database with no control-plane row.
+      let stored: { id: string };
+      try {
+        stored = await store.addBranch({
+          projectId: project.id,
+          name,
+          database: branchDb.database,
+          role: branchDb.role,
+          connectionString: branchDb.connectionString,
+        });
+      } catch {
+        try {
+          await dropBranchDatabase({
+            adminConnectionString: opts.adminConnectionString,
+            database: branchDb.database,
+            role: branchDb.role,
+          });
+        } catch {
+          // Best-effort: a GC sweep can reclaim a stale branch DB later.
+        }
+        return {
+          status: 400,
+          body: fail(
+            "E_BRANCH_EXISTS",
+            "a branch with that name already exists",
+            "pick a different branch name",
+          ),
+        };
+      }
+
+      // The scoped connection string is returned exactly once, at create time
+      // (same pattern as project create), so the caller can put it in .env.
+      return {
+        status: 200,
+        body: ok({
+          branch: {
+            id: stored.id,
+            name,
+            database: branchDb.database,
+          },
+          connectionString: branchDb.connectionString,
+        }),
+      };
+    },
+  );
+
+  router.register(
+    "GET",
+    "/v1/projects/:slug/branches",
+    async ({ headers, params }) => {
+      // Branch list is project-scoped data: require credentials AND ownership.
+      // The presence check runs after the guard so unauthenticated callers can't
+      // probe project existence via 404s. The list carries NO secrets.
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const branches = await store.listBranches(project.id);
+      return { status: 200, body: ok({ branches }) };
+    },
+  );
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/branches/:name",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const name = params.name!;
+      if (!isValidBranchName(name)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid branch name",
+            "name must match ^[a-z0-9][a-z0-9_]{0,49}$",
+          ),
+        };
+      }
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const branch = await store.getBranchByName(project.id, name);
+      if (!branch) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown branch: " + name),
+        };
+      }
+
+      // Drop the branch's Postgres DB + scoped role. Best-effort + idempotent
+      // (DROP ... IF EXISTS), so a missing/already-dropped DB never blocks
+      // removing the control-plane row.
+      try {
+        await dropBranchDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          database: branch.database,
+          role: branch.role ?? undefined,
+        });
+      } catch {
+        // Ignore: the database may never have been created or already dropped.
+      }
+      await store.deleteBranch(project.id, name);
+
+      return { status: 200, body: ok({ deleted: name }) };
     },
   );
 

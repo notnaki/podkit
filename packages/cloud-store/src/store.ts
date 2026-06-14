@@ -105,6 +105,30 @@ export type Store = {
   revokeToken: (jti: string, expiresAt: Date) => Promise<void>;
   isTokenRevoked: (jti: string) => Promise<boolean>;
   deleteProject: (projectId: string) => Promise<void>;
+  addBranch: (opts: {
+    projectId: string;
+    name: string;
+    database: string;
+    role?: string;
+    connectionString: string;
+  }) => Promise<{ id: string }>;
+  listBranches: (
+    projectId: string,
+  ) => Promise<
+    Array<{ id: string; name: string; database: string; createdAt: string }>
+  >;
+  getBranchByName: (
+    projectId: string,
+    name: string,
+  ) => Promise<{
+    id: string;
+    name: string;
+    database: string;
+    role: string | null;
+    connectionString: string | null;
+  } | null>;
+  deleteBranch: (projectId: string, name: string) => Promise<void>;
+  getBranchConnectionString: (branchId: string) => Promise<string | null>;
   close: () => Promise<void>;
 };
 
@@ -202,6 +226,23 @@ export function createStore(opts: CreateStoreOptions): Store {
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at
       ON revoked_tokens(expires_at)
+    `);
+    // Per-project database branches: each row is a copy-on-create clone of the
+    // project's base DB, with its own scoped role. db_url holds the scoped
+    // connection string, encrypted at rest with the same key as project_env /
+    // projects.db_url. UNIQUE(project_id, name) makes branch creation race-safe.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_branches (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL,
+        name text NOT NULL,
+        database text NOT NULL,
+        role text,
+        db_url text,
+        created_at timestamp DEFAULT now(),
+        UNIQUE(project_id, name),
+        FOREIGN KEY(project_id) REFERENCES projects(id)
+      )
     `);
   }
 
@@ -614,7 +655,123 @@ export function createStore(opts: CreateStoreOptions): Store {
     await pool.query(`DELETE FROM deployments WHERE project_id = $1`, [
       projectId,
     ]);
+    // project_branches has a FK to projects, so its rows must go first.
+    await pool.query(`DELETE FROM project_branches WHERE project_id = $1`, [
+      projectId,
+    ]);
     await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
+  }
+
+  async function addBranch(opts: {
+    projectId: string;
+    name: string;
+    database: string;
+    role?: string;
+    connectionString: string;
+  }): Promise<{ id: string }> {
+    // Defense-in-depth: the API also validates, but the store must never persist
+    // a branch name that couldn't have produced a valid DB identifier.
+    if (!/^[a-z0-9][a-z0-9_]{0,49}$/.test(opts.name)) {
+      throw new Error(
+        "invalid branch name: must match ^[a-z0-9][a-z0-9_]{0,49}$ (1-50 chars)",
+      );
+    }
+    // Encrypt the scoped DB connection string at rest when a key is configured.
+    const stored = secretsKey
+      ? encryptValue(opts.connectionString, secretsKey)
+      : opts.connectionString;
+    const result = await pool.query<{ id: string }>(
+      `INSERT INTO project_branches (project_id, name, database, role, db_url)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [opts.projectId, opts.name, opts.database, opts.role ?? null, stored],
+    );
+    return { id: result.rows[0].id };
+  }
+
+  async function listBranches(
+    projectId: string,
+  ): Promise<
+    Array<{ id: string; name: string; database: string; createdAt: string }>
+  > {
+    // No secrets in the list: db_url/role are deliberately omitted.
+    const result = await pool.query<{
+      id: string;
+      name: string;
+      database: string;
+      created_at: Date | null;
+    }>(
+      `SELECT id, name, database, created_at FROM project_branches
+       WHERE project_id = $1 ORDER BY name ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      database: r.database,
+      createdAt: r.created_at ? r.created_at.toISOString() : "",
+    }));
+  }
+
+  async function getBranchByName(
+    projectId: string,
+    name: string,
+  ): Promise<{
+    id: string;
+    name: string;
+    database: string;
+    role: string | null;
+    connectionString: string | null;
+  } | null> {
+    const result = await pool.query<{
+      id: string;
+      name: string;
+      database: string;
+      role: string | null;
+      db_url: string | null;
+    }>(
+      `SELECT id, name, database, role, db_url FROM project_branches
+       WHERE project_id = $1 AND name = $2 LIMIT 1`,
+      [projectId, name],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const connectionString = row.db_url
+      ? secretsKey
+        ? decryptValue(row.db_url, secretsKey)
+        : row.db_url
+      : null;
+    return {
+      id: row.id,
+      name: row.name,
+      database: row.database,
+      role: row.role,
+      connectionString,
+    };
+  }
+
+  async function deleteBranch(projectId: string, name: string): Promise<void> {
+    await pool.query(
+      `DELETE FROM project_branches WHERE project_id = $1 AND name = $2`,
+      [projectId, name],
+    );
+  }
+
+  async function getBranchConnectionString(
+    branchId: string,
+  ): Promise<string | null> {
+    let result;
+    try {
+      result = await pool.query<{ db_url: string | null }>(
+        `SELECT db_url FROM project_branches WHERE id = $1 LIMIT 1`,
+        [branchId],
+      );
+    } catch {
+      // Malformed id (e.g. not a valid uuid) -> treat as not found.
+      return null;
+    }
+    const row = result.rows[0];
+    if (!row || !row.db_url) return null;
+    return secretsKey ? decryptValue(row.db_url, secretsKey) : row.db_url;
   }
 
   async function close(): Promise<void> {
@@ -648,6 +805,11 @@ export function createStore(opts: CreateStoreOptions): Store {
     revokeToken,
     isTokenRevoked,
     deleteProject,
+    addBranch,
+    listBranches,
+    getBranchByName,
+    deleteBranch,
+    getBranchConnectionString,
     close,
   };
 }

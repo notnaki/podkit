@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, getToken } from "../api/client.ts";
+import { api, getToken, type Branch } from "../api/client.ts";
 import { useApi, relativeTime } from "../lib/useApi.ts";
 
 const TABS = ["Overview", "Deployments", "Logs", "Metrics", "Database", "Domains", "Environment", "Settings"] as const;
@@ -491,6 +491,147 @@ function Metrics({ slug }: { slug: string }) {
   );
 }
 
+// Client-side branch-name guard mirrors the control-plane's validator
+// (^[a-z0-9][a-z0-9_]{0,49}$) so we reject obviously-bad input before the
+// round-trip; the server remains the authority.
+const BRANCH_NAME_RE = /^[a-z0-9][a-z0-9_]{0,49}$/;
+
+function Branches({ slug }: { slug: string }) {
+  const branches = useApi(() => api.listBranches(slug), [slug]);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // The scoped connection string is returned exactly once, at create time; we
+  // surface it in a copyable block until the next create/dismiss.
+  const [created, setCreated] = useState<{ name: string; connectionString: string } | null>(null);
+  // Branch pending deletion (drives the confirmation modal); null = closed.
+  const [pending, setPending] = useState<Branch | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const hasKey = getToken() !== "";
+  const list = branches.data?.branches ?? [];
+  const trimmed = name.trim();
+  const valid = BRANCH_NAME_RE.test(trimmed);
+
+  async function create() {
+    if (!valid) return;
+    setBusy(true); setNote(null); setCreated(null);
+    const res = await api.createBranch(slug, trimmed);
+    setBusy(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `created ${res.data.branch.name}` });
+      setCreated({ name: res.data.branch.name, connectionString: res.data.connectionString });
+      setName("");
+      branches.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+    }
+  }
+
+  async function confirmDelete() {
+    if (!pending) return;
+    setDeleting(true); setNote(null);
+    const res = await api.deleteBranch(slug, pending.name);
+    setDeleting(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `deleted ${pending.name}` });
+      setPending(null);
+      branches.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+      setPending(null);
+    }
+  }
+
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-head">
+          <h3>Branches</h3>
+          {list.length > 0 && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{list.length} branch{list.length === 1 ? "" : "es"}</span>}
+        </div>
+        <div className="panel-body flush" style={{ padding: 0 }}>
+          {branches.loading ? (
+            <div className="state">Loading…</div>
+          ) : branches.error ? (
+            <div className="state"><strong>{branches.error.code}</strong><span>{branches.error.message}</span></div>
+          ) : list.length === 0 ? (
+            <div className="state"><strong>No branches yet</strong><span>Create one below, or from the CLI: <span className="mono">podkit cloud branches create {slug} &lt;name&gt;</span></span></div>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Name</th><th>Database</th><th>Created</th><th style={{ width: 1 }} /></tr></thead>
+              <tbody>
+                {list.map((b) => (
+                  <tr key={b.id}>
+                    <td className="mono">{b.name}</td>
+                    <td className="mono faint">{b.database}</td>
+                    <td className="faint mono" style={{ fontSize: "var(--t-sm)" }}>{fmtTime(b.createdAt)}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn btn-ghost" disabled={!hasKey} onClick={() => setPending(b)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div className="panel-foot">Each branch is an isolated clone database with its own scoped role. The connection string is shown once, at create time.</div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head"><h3>Create branch</h3></div>
+        <div className="panel-body stack">
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to create branches</span>}
+          <div className="field">
+            <label>Branch name <span className="faint">— lowercase, digits, underscore (1-50)</span></label>
+            <input
+              className="input mono"
+              placeholder="staging"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && hasKey && !busy && valid) create(); }}
+            />
+          </div>
+          {trimmed !== "" && !valid && <span className="status status-error"><span className="dot" />name must match ^[a-z0-9][a-z0-9_]{"{0,49}"}$</span>}
+          {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
+          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !valid} onClick={create}>{busy ? "Creating…" : "Create"}</button></div>
+          {created && (
+            <div className="field">
+              <label>Connection string for <span className="mono">{created.name}</span> <span className="faint">— shown once, treat as a secret</span></label>
+              <pre className="code" style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{created.connectionString}</pre>
+              <div className="row" style={{ gap: "var(--space-sm)" }}>
+                <CopyButton value={created.connectionString} label="Copy" />
+                <button className="btn btn-ghost btn-sm" onClick={() => setCreated(null)}>Dismiss</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {pending && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!deleting) setPending(null); }}
+          style={{ position: "fixed", inset: 0, background: "color-mix(in oklch, var(--bg) 70%, transparent)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "var(--space-lg)", zIndex: 50 }}
+        >
+          <div className="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480, width: "100%" }}>
+            <div className="panel-head"><h3>Delete branch</h3></div>
+            <div className="panel-body stack">
+              <p className="muted" style={{ margin: 0, maxWidth: "52ch" }}>
+                Delete branch <span className="mono" style={{ color: "var(--text)" }}>{pending.name}</span>? This will drop the database <span className="mono" style={{ color: "var(--text)" }}>{pending.database}</span> and all its data. This cannot be undone.
+              </p>
+              <div className="row" style={{ justifyContent: "flex-end", gap: "var(--space-sm)" }}>
+                <button className="btn btn-ghost" disabled={deleting} onClick={() => setPending(null)}>Cancel</button>
+                <button className="btn btn-danger" disabled={!hasKey || deleting} onClick={confirmDelete}>{deleting ? "Deleting…" : "Delete branch"}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function Database({ slug }: { slug: string }) {
   const [sql, setSql] = useState("");
   const [busy, setBusy] = useState(false);
@@ -520,6 +661,8 @@ function Database({ slug }: { slug: string }) {
         </div>
         <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
       </section>
+
+      <Branches slug={slug} />
 
       <section className="panel">
         <div className="panel-head">
