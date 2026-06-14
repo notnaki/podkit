@@ -105,6 +105,25 @@ function slugFromPath(path: string): string | null {
   return match ? match[1]! : null;
 }
 
+// The "active" production deployment is the most recent deploy/rollback — NOT
+// simply the last row of listDeployments. listDeployments returns oldest-first
+// and mixes kinds: preview (kind="preview") and teardown (kind="stopped",
+// containerId="") rows are appended to the same per-project history but never
+// own the production route. So scan newest -> oldest and stop at the first
+// deploy/rollback. Shared by GET /deployments, DELETE /projects/:slug, and
+// GET /logs so they all agree on which deployment is serving traffic.
+function findActiveDeployment<T extends { kind: string }>(
+  deployments: ReadonlyArray<T>,
+): T | undefined {
+  for (let i = deployments.length - 1; i >= 0; i--) {
+    const d = deployments[i]!;
+    if (d.kind === "deploy" || d.kind === "rollback") {
+      return d;
+    }
+  }
+  return undefined;
+}
+
 // Reject any SQL that is not a single, read-only SELECT. This is a deliberately
 // conservative allow/deny gate layered *in front of* the per-project scoped role
 // (which is the real isolation boundary — see provisionDatabase): even a parser
@@ -760,16 +779,26 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     });
     runningContainers.push(name);
 
-    await store.recordDeployment({
-      projectId: input.projectId,
-      version,
-      containerId: id,
-      hostPort,
-      status: "running",
-      containerPort: input.containerPort,
-      kind: input.kind,
-      branchId: input.branchId,
-    });
+    // The container is live but not yet routed or persisted. If the deployment
+    // row insert fails, stop+forget the orphaned container before rethrowing so
+    // the deploy stays atomic — no leaked container, no in-memory dangling name.
+    // Node is single-threaded with no await between push and recordDeployment,
+    // so this cleanup is race-free.
+    try {
+      await store.recordDeployment({
+        projectId: input.projectId,
+        version,
+        containerId: id,
+        hostPort,
+        status: "running",
+        containerPort: input.containerPort,
+        kind: input.kind,
+        branchId: input.branchId,
+      });
+    } catch (err) {
+      await stopAndForget(name);
+      throw err;
+    }
 
     const target = routeTarget(name, input.containerPort, hostPort);
     if (input.kind === "preview" && input.branchName) {
@@ -993,18 +1022,6 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           };
         }
       }
-      // Validate + resolve the build context to a real on-disk path, rejecting
-      // system directories, the control-plane source, and (when configured)
-      // anything outside the builds sandbox. Defense-in-depth alongside the
-      // appSubpath whitelist above and Docker's own filesystem isolation.
-      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
-      if ("error" in ctx) {
-        return {
-          status: 400,
-          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
-        };
-      }
-      const contextDir = ctx.path;
       const project = await store.getProjectBySlug(slug);
       if (!project) {
         return {
@@ -1015,6 +1032,21 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       const access = await authorizeProject(headers, project);
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
+
+      // Validate + resolve the build context to a real on-disk path, rejecting
+      // system directories, the control-plane source, and (when configured)
+      // anything outside the builds sandbox. Defense-in-depth alongside the
+      // appSubpath whitelist above and Docker's own filesystem isolation.
+      // Runs AFTER the ownership check so its distinct filesystem-probing error
+      // messages can't leak host state to authenticated non-owner callers.
+      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
+      if ("error" in ctx) {
+        return {
+          status: 400,
+          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
+        };
+      }
+      const contextDir = ctx.path;
 
       const result = await buildAndDeploy({
         slug,
@@ -1105,14 +1137,6 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           };
         }
       }
-      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
-      if ("error" in ctx) {
-        return {
-          status: 400,
-          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
-        };
-      }
-      const contextDir = ctx.path;
       const project = await store.getProjectBySlug(slug);
       if (!project) {
         return {
@@ -1123,6 +1147,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       const access = await authorizeProject(headers, project);
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
+
+      // Validate the build context AFTER the ownership check so its distinct
+      // filesystem-probing error messages can't leak host state to
+      // authenticated non-owner callers.
+      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
+      if ("error" in ctx) {
+        return {
+          status: 400,
+          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
+        };
+      }
+      const contextDir = ctx.path;
 
       // The branch must already exist for THIS project (scoped to projectId by
       // the store query), so a caller can't preview-deploy against another
@@ -1226,6 +1262,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (containerName) {
         await stopAndForget(containerName);
         byBranch!.delete(branchName);
+        // Drop the slug's inner Map once its last preview is gone, so empty
+        // Maps don't accumulate (one per distinct slug) for the process lifetime.
+        if (byBranch!.size === 0) activePreview.delete(slug);
       }
       // Clear the preview route (no-op if absent).
       routeMap.delete(slug + "--" + branchName);
@@ -1257,6 +1296,17 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       return {
         status: 400,
         body: fail("E_BAD_ARGS", "email required", "POST {email, password}"),
+      };
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(b.email)) {
+      return {
+        status: 400,
+        body: fail(
+          "E_BAD_ARGS",
+          "invalid email format",
+          "POST {email, password}",
+        ),
       };
     }
     if (!b.password || typeof b.password !== "string") {
@@ -1487,10 +1537,11 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
 
-      // Stop the active container (the most recent deployment) if any. Best
-      // effort: a pruned/already-stopped container must not block teardown.
+      // Stop the active production container if any — the most recent
+      // deploy/rollback (findActiveDeployment), not blindly the last row.
+      // Best effort: a pruned/already-stopped container must not block teardown.
       const deployments = await store.listDeployments(project.id);
-      const active = deployments[deployments.length - 1];
+      const active = findActiveDeployment(deployments);
       if (active && active.containerId) {
         try {
           await stopContainer(active.containerId);
@@ -1510,6 +1561,24 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         });
       } catch {
         // Ignore: database may have never been provisioned or already dropped.
+      }
+
+      // Drop every branch's Postgres DB + scoped role. Branches are separately
+      // provisioned databases that exist independently of any preview deploy, so
+      // they must be enumerated explicitly here or they leak after the project's
+      // control-plane rows are removed. listBranches omits the role, but it
+      // follows the documented `<database>_app` convention via
+      // roleNameForDatabase. Best-effort + idempotent (DROP ... IF EXISTS).
+      for (const branch of await store.listBranches(project.id)) {
+        try {
+          await dropBranchDatabase({
+            adminConnectionString: opts.adminConnectionString,
+            database: branch.database,
+            role: roleNameForDatabase(branch.database),
+          });
+        } catch {
+          // Ignore: a branch DB may never have been created or already dropped.
+        }
       }
 
       // Stop any live branch-preview containers and drop their routes.
@@ -1554,16 +1623,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     // the project, i.e. the most recent deploy/rollback — NOT simply the last
     // row: preview (kind="preview") and teardown (kind="stopped") rows are
     // appended to the same history but never own the production route, so they
-    // must not steal the "Current" badge. Scan newest -> oldest for a prod kind.
+    // must not steal the "Current" badge.
     const deployments = await store.listDeployments(project.id);
-    let activeId: string | null = null;
-    for (let i = deployments.length - 1; i >= 0; i--) {
-      const d = deployments[i]!;
-      if (d.kind === "deploy" || d.kind === "rollback") {
-        activeId = d.id;
-        break;
-      }
-    }
+    const activeId = findActiveDeployment(deployments)?.id ?? null;
     // Present newest-first and flag which one is currently serving traffic.
     const items = deployments
       .slice()
@@ -1653,8 +1715,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         target = { id: d.id, version: d.version, containerId: d.containerId };
       }
     } else {
+      // Default to the active production deployment — the most recent
+      // deploy/rollback, not simply the last row (a kind="stopped" preview
+      // teardown with containerId="" can be the last row even while production
+      // is still running, which would wrongly return empty logs).
       const deployments = await store.listDeployments(project.id);
-      const active = deployments[deployments.length - 1];
+      const active = findActiveDeployment(deployments);
       if (active) {
         target = {
           id: active.id,
@@ -1802,15 +1868,22 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
       // A rollback is recorded as a new deployment (append-only history) that
       // re-uses the target's version; being newest, it becomes the active one.
-      await store.recordDeployment({
-        projectId: project.id,
-        version: target.version,
-        containerId: started.id,
-        hostPort: started.hostPort,
-        status: "running",
-        containerPort: target.containerPort,
-        kind: "rollback",
-      });
+      // If the row insert fails, stop+forget the orphaned container before
+      // rethrowing so the rollback stays atomic (mirrors buildAndDeploy).
+      try {
+        await store.recordDeployment({
+          projectId: project.id,
+          version: target.version,
+          containerId: started.id,
+          hostPort: started.hostPort,
+          status: "running",
+          containerPort: target.containerPort,
+          kind: "rollback",
+        });
+      } catch (err) {
+        await stopAndForget(name);
+        throw err;
+      }
       routeMap.set(
         slug,
         routeTarget(name, target.containerPort, started.hostPort),
@@ -2400,16 +2473,21 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       appSubpath = subpath;
     }
 
-    // Container port: default 3000, must be a positive integer.
+    // Container port: default 3000, must be an integer in 1..65535.
     let containerPort = 3000;
     if (input.containerPort !== null) {
       const n = Number(input.containerPort);
-      if (!Number.isInteger(n) || n < 1 || !/^\d+$/.test(input.containerPort)) {
+      if (
+        !/^\d+$/.test(input.containerPort) ||
+        !Number.isInteger(n) ||
+        n < 1 ||
+        n > 65535
+      ) {
         return reject(
           400,
           fail(
             "E_BAD_ARGS",
-            "containerPort must be a positive integer",
+            "containerPort must be an integer between 1 and 65535",
             "?containerPort=3000",
           ),
         );

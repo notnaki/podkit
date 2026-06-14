@@ -174,6 +174,14 @@ afterAll(async () => {
   } catch {
     // ignore
   }
+  try {
+    await dropDatabase({
+      adminConnectionString: connectionString,
+      database: "proj_sec_demo",
+    });
+  } catch {
+    // ignore
+  }
   if (pgContainer) {
     try {
       await execFileAsync("docker", ["rm", "-f", pgContainer]);
@@ -297,9 +305,19 @@ describe("cloud-host full loop (real Docker + Postgres)", () => {
   it(
     "rejects dangerous contextDir values and accepts the sandboxed fixture",
     async () => {
+      // The project must exist first: contextDir validation runs AFTER the
+      // project lookup + ownership check (so its distinct filesystem-probing
+      // error messages can't leak host state to non-owners), so a deploy to an
+      // unknown slug 404s before validation. Create the project, then assert the
+      // dangerous-path rejections.
+      await fetch(apiUrl + "/v1/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ slug: "sec-demo", owner: "me" }),
+      });
+
       // /etc lives outside the build sandbox (PODKIT_BUILDS_ROOT = tmpdir) and
       // is a system directory either way: must be rejected with 400 E_BAD_ARGS.
-      // Validation runs before project lookup, so an unknown slug still 400s.
       const etcRes = await fetch(apiUrl + "/v1/projects/sec-demo/deploy", {
         method: "POST",
         headers: { "content-type": "application/json", "x-podkit-key": "k" },

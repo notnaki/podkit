@@ -503,6 +503,25 @@ describe("upload-based deploy (real Docker + Postgres)", () => {
   );
 
   it(
+    "rejects an out-of-range containerPort with 400 (upper bound)",
+    async () => {
+      // Reuses the "uplmal" project. The containerPort guard runs after the
+      // credential check but before the project lookup and body read, so a tiny
+      // dummy body is enough. 99999 is a positive integer that matches /^\d+$/
+      // but exceeds the max TCP port (65535) and must be rejected up front.
+      const res = await postRaw(
+        "/v1/projects/uplmal/deploy-upload?containerPort=99999",
+        Buffer.from("x"),
+        { "content-type": "application/gzip", authorization: `Bearer ${ownerToken}` },
+      );
+      expect(res.status).toBe(400);
+      expect(res.body.ok).toBe(false);
+      expect(res.body.error.code).toBe("E_BAD_ARGS");
+    },
+    120000,
+  );
+
+  it(
     "rejects an oversized upload with 413",
     async () => {
       // Reuses the "uplmal" project; the size guard runs after auth/ownership.
