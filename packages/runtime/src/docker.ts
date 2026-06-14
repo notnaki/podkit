@@ -1,7 +1,88 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { request as httpRequest } from "node:http";
 
 const execFileAsync = promisify(execFile);
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Probe a single URL once. Resolves with the HTTP status code, or null if the
+ * connection failed / timed out (container not yet listening). Uses a short
+ * per-attempt timeout so a hung socket doesn't stall the whole poll.
+ */
+function probeOnce(
+  host: string,
+  port: number,
+  path: string,
+  perAttemptTimeoutMs: number,
+): Promise<number | null> {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const done = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(code);
+    };
+    const req = httpRequest(
+      { host, port, path, method: "GET", timeout: perAttemptTimeoutMs },
+      (res) => {
+        const code = res.statusCode ?? null;
+        // Drain and discard the body so the socket can close cleanly.
+        res.resume();
+        done(code);
+      },
+    );
+    req.on("error", () => done(null));
+    req.on("timeout", () => {
+      req.destroy();
+      done(null);
+    });
+    req.end();
+  });
+}
+
+/**
+ * Bounded readiness poll for a freshly-started container. Repeatedly probes
+ * `GET http://{host}:{port}/health` every 500ms until the deadline. A response
+ * is considered "ready" when its status is 2xx (lenient: any success), OR when
+ * /health 404s but `/` returns any non-5xx status — the fallback for apps that
+ * don't expose a dedicated /health endpoint but do serve their root quickly.
+ * Connection-refused / timeout attempts simply retry until the deadline.
+ *
+ * Returns true iff the container became ready within `timeoutMs`. The caller
+ * routes traffic ONLY on true, so the gateway never sees a half-started
+ * container (zero-downtime: the old container stays routed until the new one is
+ * provably ready). Defaults to a 30s budget with 500ms intervals (~60 attempts).
+ */
+export async function waitForReadiness(
+  host: string,
+  port: number,
+  timeoutMs: number = 30000,
+): Promise<boolean> {
+  const intervalMs = 500;
+  const perAttemptTimeoutMs = 2000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // Primary: /health. A 2xx means ready.
+    const healthStatus = await probeOnce(host, port, "/health", perAttemptTimeoutMs);
+    if (healthStatus !== null && healthStatus >= 200 && healthStatus < 300) {
+      return true;
+    }
+    // Fallback for apps without /health: if /health was reachable but not a
+    // success (e.g. 404), probe "/" and accept any non-5xx status — most web
+    // apps return 200 (or a redirect) on their root once they're listening.
+    if (healthStatus !== null) {
+      const rootStatus = await probeOnce(host, port, "/", perAttemptTimeoutMs);
+      if (rootStatus !== null && rootStatus < 500) {
+        return true;
+      }
+    }
+    await sleep(intervalMs);
+  }
+  return false;
+}
 
 export interface BuildImageOptions {
   contextDir: string;

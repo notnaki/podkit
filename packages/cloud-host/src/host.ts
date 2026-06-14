@@ -29,6 +29,8 @@ import {
   containerLogs,
   isPodkitApp,
   buildPodkitApp,
+  waitForReadiness,
+  DEFAULT_BASE_IMAGE,
 } from "@podkit/runtime";
 import { createGateway } from "@podkit/gateway";
 import { createMetricsRegistry } from "@podkit/telemetry";
@@ -62,6 +64,9 @@ export type CreateCloudOptions = {
   apiKey?: string;
   consoleDir?: string;
   corsOrigins?: string;
+  // Vendored base image standalone app builds build FROM. Defaults to
+  // PODKIT_BASE_IMAGE env, then the runtime's DEFAULT_BASE_IMAGE.
+  baseImage?: string;
 };
 
 export type Cloud = {
@@ -599,6 +604,64 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // tests / local dev) => reach the app via the published port on localhost.
   const appNetwork = process.env.PODKIT_APP_NETWORK || undefined;
 
+  // Vendored base image for standalone app builds. Resolution order:
+  // explicit option -> PODKIT_BASE_IMAGE env -> runtime default
+  // (podkit-base:latest). ensureBaseImage() (called from listen()) builds it
+  // from infra/Dockerfile.base if it isn't already present locally.
+  const baseImage =
+    opts.baseImage || process.env.PODKIT_BASE_IMAGE || DEFAULT_BASE_IMAGE;
+
+  // Build the vendored base image (the full monorepo with @podkit/* + node_modules
+  // preinstalled) once, if it isn't already present locally. Idempotent: a
+  // `docker image inspect` hit short-circuits, so repeated control-plane restarts
+  // reuse the cached image. When the operator points PODKIT_BASE_IMAGE at a
+  // pre-built/registry tag and it already exists, this is a no-op. We log but do
+  // NOT throw on a build failure — standalone deploys will fail fast later with a
+  // clear "base image not found" error from docker build, while Dockerfile/monorepo
+  // deploys (which don't need the base) keep working.
+  async function ensureBaseImage(): Promise<void> {
+    try {
+      await execFileAsync("docker", ["image", "inspect", baseImage]);
+      return; // already present
+    } catch {
+      // Not present locally; fall through to build it.
+    }
+    const dockerfilePath = join(controlPlaneRoot, "infra", "Dockerfile.base");
+    if (!existsSync(dockerfilePath)) {
+      console.error(
+        "podkit-base image is missing and infra/Dockerfile.base was not found at " +
+          dockerfilePath +
+          " — standalone app deploys will fail until the base image (" +
+          baseImage +
+          ") is available. Set PODKIT_BASE_IMAGE to a pre-built tag.",
+      );
+      return;
+    }
+    try {
+      console.error(
+        "building vendored base image " +
+          baseImage +
+          " (one-time) from " +
+          dockerfilePath +
+          " ...",
+      );
+      await execFileAsync(
+        "docker",
+        ["build", "-f", dockerfilePath, "-t", baseImage, controlPlaneRoot],
+        { maxBuffer: 64 * 1024 * 1024 },
+      );
+      console.error("vendored base image " + baseImage + " is ready");
+    } catch (err) {
+      console.error(
+        "failed to build vendored base image " +
+          baseImage +
+          ": " +
+          (err instanceof Error ? err.message : String(err)) +
+          " — standalone app deploys will fail until it is built; Dockerfile/monorepo deploys are unaffected.",
+      );
+    }
+  }
+
   // route key -> the address the gateway dials for the live container.
   const routeMap = new Map<string, { host: string; port: number }>();
 
@@ -713,6 +776,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     kind: string;
     branchId: string | null;
     branchName?: string;
+    // When true, a podkit app (no Dockerfile) builds via the vendored base image
+    // (standalone, Vercel-like): the build context is the app itself and only its
+    // extra deps are installed. When false/undefined, a podkit app under
+    // appSubpath builds via the monorepo generator (the original path). Ignored
+    // when an explicit Dockerfile is present (the user opt-out always wins).
+    standalone?: boolean;
     // Extra env merged on top of the project's env vars (e.g. the branch's
     // scoped DATABASE_URL for a preview). These take precedence so a preview's
     // DB conn string overrides any project-level DATABASE_URL.
@@ -739,13 +808,19 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       ? join(contextDir, input.appSubpath)
       : contextDir;
     if (existsSync(join(appDir, "Dockerfile"))) {
+      // (1) Explicit Dockerfile wins — user opt-out of the buildpack entirely.
       await buildImage({ contextDir: appDir, tag });
     } else if (isPodkitApp(appDir)) {
+      // (2) Standalone one-click: build FROM the vendored base image, context =
+      //     the uploaded app itself. (3) Otherwise monorepo: build FROM node:22
+      //     with the whole workspace and the app under appSubpath.
       await buildPodkitApp({
         repoRoot: contextDir,
         appSubpath: input.appSubpath ?? ".",
         tag,
         port: input.containerPort,
+        standaloneMode: input.standalone === true,
+        baseImage,
       });
     } else {
       return {
@@ -801,6 +876,31 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
 
     const target = routeTarget(name, input.containerPort, hostPort);
+
+    // Bounded readiness poll BEFORE routing any traffic: probe the new container
+    // until it answers (2xx on /health, or any non-5xx on / as a fallback) or a
+    // 30s budget elapses. We poll the SAME address the gateway will dial (network
+    // mode => container-name:containerPort; host mode => localhost:hostPort) so a
+    // pass guarantees the gateway can reach it. If it never becomes ready, we do
+    // NOT set the route (the old container stays serving = zero-downtime); we
+    // stop+forget the dead container and the deployment row stays as a failed
+    // historical record. This is the gateway-never-sees-a-half-broken-route
+    // guarantee from the one-click design.
+    const ready = await waitForReadiness(target.host, target.port, 30000);
+    if (!ready) {
+      await stopAndForget(name);
+      return {
+        error: {
+          status: 503,
+          code: "E_CONTAINER_FAILED",
+          message: "container did not become ready within 30s",
+          hint: "ensure the app listens on port " +
+            input.containerPort +
+            " and returns 2xx on /health (or / quickly)",
+        },
+      };
+    }
+
     if (input.kind === "preview" && input.branchName) {
       const routeKey = slug + "--" + input.branchName;
       routeMap.set(routeKey, target);
@@ -847,6 +947,14 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }
       // The extracted dir is a fresh, audited, control-plane-owned path, so it
       // is a valid build context by construction; pass it straight through.
+      //
+      // Standalone detection: an upload with NO appSubpath is a true standalone
+      // app (the app is at the tarball root) -> build via the vendored base image
+      // (one-click). An upload WITH appSubpath is a monorepo tarball -> the
+      // original monorepo generator (standalone=false) preserves backward compat.
+      // buildAndDeploy only consults `standalone` for podkit apps without a
+      // Dockerfile; a Dockerfile upload ignores it entirely.
+      const standalone = !input.appSubpath;
       return await buildAndDeploy({
         slug: input.slug,
         projectId: input.projectId,
@@ -856,6 +964,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         kind: input.kind ?? "deploy",
         branchId: input.branchId ?? null,
         branchName: input.branchName,
+        standalone,
         extraEnv: input.extraEnv,
       });
     } finally {
@@ -1884,10 +1993,34 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         await stopAndForget(name);
         throw err;
       }
-      routeMap.set(
-        slug,
-        routeTarget(name, target.containerPort, started.hostPort),
+
+      // Same zero-downtime guarantee as a fresh deploy: poll the rolled-back
+      // container until it is provably serving before routing to it. If it never
+      // becomes ready, leave the current route untouched and stop+forget the dead
+      // container so the rollback fails fast without dropping live traffic.
+      const rollbackTarget = routeTarget(
+        name,
+        target.containerPort,
+        started.hostPort,
       );
+      const ready = await waitForReadiness(
+        rollbackTarget.host,
+        rollbackTarget.port,
+        30000,
+      );
+      if (!ready) {
+        await stopAndForget(name);
+        return {
+          status: 503,
+          body: fail(
+            "E_CONTAINER_FAILED",
+            "rolled-back container did not become ready within 30s",
+            "the image for version " + target.version + " may be unhealthy",
+          ),
+        };
+      }
+
+      routeMap.set(slug, rollbackTarget);
       await reapSuperseded(slug, name);
 
       return {
@@ -2779,6 +2912,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       gatewayPort: number;
     }): Promise<{ apiUrl: string; gatewayUrl: string }> {
       await store.migrate();
+
+      // Ensure the vendored base image exists BEFORE the server accepts deploys,
+      // so the first standalone one-click deploy doesn't race a missing base.
+      // Idempotent and non-fatal (logs on failure; standalone deploys fail fast
+      // later with a clear error, other deploy paths are unaffected).
+      await ensureBaseImage();
 
       // Hydrate the in-memory domain -> slug map from persisted custom domains.
       const allDomains = await store.listAllDomains();
