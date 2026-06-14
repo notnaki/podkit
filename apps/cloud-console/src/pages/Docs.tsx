@@ -102,6 +102,15 @@ pnpm install
 # run the CLI (from a workspace that exposes it)
 podkit --help`}</Block>
 
+      <h3>Create an app</h3>
+      <p>
+        Scaffold a new podkit app — file-based routes, a server loader, and a
+        client entry — with one command, then run it locally.
+      </p>
+      <Block>{`podkit init my-app                 # scaffold ./my-app
+cd my-app
+podkit dev                         # http://localhost:3000`}</Block>
+
       <h3>Sign in</h3>
       <p>
         Authorize the CLI against your control-plane. <code>podkit cloud login</code>{" "}
