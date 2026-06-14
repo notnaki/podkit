@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
-import { useApi } from "../lib/useApi.ts";
+import { useApi, relativeTime } from "../lib/useApi.ts";
 
-const TABS = ["Overview", "Deployments", "Logs", "Storage", "Domains", "Environment", "Settings"] as const;
+const TABS = ["Overview", "Deployments", "Logs", "Metrics", "Database", "Domains", "Environment", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
@@ -26,7 +26,10 @@ export function Project({ slug }: { slug: string }) {
                 : <span className="faint mono" style={{ fontSize: "var(--t-sm)" }}>not deployed</span>}
             </div>
           </div>
-          {url && <a className="btn" href={url} target="_blank" rel="noreferrer">Visit ↗</a>}
+          <div className="row" style={{ gap: "var(--space-sm)" }}>
+            {url && <CopyButton value={url} label="Copy URL" />}
+            {url && <a className="btn" href={url} target="_blank" rel="noreferrer">Visit ↗</a>}
+          </div>
         </div>
       </div>
 
@@ -78,17 +81,10 @@ export function Project({ slug }: { slug: string }) {
           <Deployments slug={slug} url={url} reload={detail.reload} />
         ) : tab === "Logs" ? (
           <Logs slug={slug} />
-        ) : tab === "Storage" ? (
-          <section className="panel">
-            <div className="panel-head"><h3>Database</h3><span className="status status-ready"><span className="dot" />Postgres</span></div>
-            <div className="panel-body">
-              <p className="muted" style={{ marginBottom: "var(--space-md)", maxWidth: "60ch" }}>
-                Every project gets a dedicated managed Postgres database, provisioned on creation. The connection string is shown once at create time (treat it as a secret).
-              </p>
-              <dl className="kv"><dt>Engine</dt><dd className="mono">postgres 16</dd><dt>Isolation</dt><dd>database-per-project</dd></dl>
-            </div>
-            <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
-          </section>
+        ) : tab === "Metrics" ? (
+          <Metrics slug={slug} />
+        ) : tab === "Database" ? (
+          <Database slug={slug} />
         ) : tab === "Domains" ? (
           <Domains slug={slug} />
         ) : tab === "Environment" ? (
@@ -150,6 +146,25 @@ function fmtTime(iso: string | null): string {
   });
 }
 
+// Subtle, on-brand copy button: ghost styling, flips to a "Copied" state briefly.
+function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // Clipboard unavailable (insecure context / denied) — fail quietly.
+    }
+  }
+  return (
+    <button className="btn btn-ghost btn-sm" onClick={copy} title={`Copy ${value}`}>
+      {copied ? "✓ Copied" : label}
+    </button>
+  );
+}
+
 function Deployments({ slug, url, reload }: { slug: string; url: string | null; reload: () => void }) {
   const history = useApi(() => api.listDeployments(slug), [slug]);
   const [busy, setBusy] = useState(false);
@@ -189,7 +204,12 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
       <section className="panel">
         <div className="panel-head">
           <h3>Deployment history</h3>
-          {url && <a className="mono muted" href={url} target="_blank" rel="noreferrer" style={{ fontSize: "var(--t-sm)" }}>{url.replace(/^https?:\/\//, "")} ↗</a>}
+          {url && (
+            <div className="row" style={{ gap: "var(--space-sm)", alignItems: "center" }}>
+              <a className="mono muted" href={url} target="_blank" rel="noreferrer" style={{ fontSize: "var(--t-sm)" }}>{url.replace(/^https?:\/\//, "")} ↗</a>
+              <CopyButton value={url} label="Copy" />
+            </div>
+          )}
         </div>
         <div className="panel-body flush" style={{ padding: 0 }}>
           {history.loading ? (
@@ -226,9 +246,21 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
 }
 
 function Logs({ slug }: { slug: string }) {
-  const logs = useApi(() => api.getLogs(slug), [slug]);
+  const [lines, setLines] = useState("");
+  const [since, setSince] = useState("");
+  // applied filters drive the request; editing the inputs doesn't refetch until Apply.
+  const [applied, setApplied] = useState<{ limit?: number; since?: string }>({});
+  const logs = useApi(() => api.getLogs(slug, applied), [slug, applied]);
   const data = logs.data ?? null;
   const text = data?.logs ?? "";
+
+  function apply() {
+    const n = parseInt(lines, 10);
+    setApplied({
+      limit: Number.isFinite(n) && n > 0 ? n : undefined,
+      since: since.trim() || undefined,
+    });
+  }
 
   return (
     <section className="panel">
@@ -238,6 +270,11 @@ function Logs({ slug }: { slug: string }) {
           {data?.version && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{data.version}</span>}
           <button className="btn btn-ghost" disabled={logs.loading} onClick={() => logs.reload()}>{logs.loading ? "Refreshing…" : "Refresh"}</button>
         </div>
+      </div>
+      <div className="row" style={{ gap: "var(--space-md)", alignItems: "flex-end", padding: "var(--space-md) var(--space-lg)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+        <div className="field"><label>lines</label><input className="input mono" type="number" min={1} max={10000} placeholder="all" value={lines} onChange={(e) => setLines(e.target.value)} style={{ width: 100 }} /></div>
+        <div className="field"><label>since (e.g. 2026-06-14T12:00 or 1h)</label><input className="input mono" placeholder="—" value={since} onChange={(e) => setSince(e.target.value)} style={{ width: 220 }} /></div>
+        <button className="btn" disabled={logs.loading} onClick={apply}>Apply</button>
       </div>
       <div className="panel-body flush" style={{ padding: 0 }}>
         {logs.loading ? (
@@ -410,6 +447,127 @@ function Environment({ slug }: { slug: string }) {
           {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
           <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !key.trim()} onClick={add}>{busy ? "Saving…" : "Add"}</button></div>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function Metrics({ slug }: { slug: string }) {
+  const metrics = useApi(() => api.getMetrics(slug), [slug]);
+  const m = metrics.data ?? null;
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h3>Traffic</h3>
+        <div className="row" style={{ gap: "var(--space-md)", alignItems: "center" }}>
+          {m && m.lastSeen !== null && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>last seen {relativeTime(m.lastSeen, Date.now())}</span>}
+          <button className="btn btn-ghost" disabled={metrics.loading} onClick={() => metrics.reload()}>{metrics.loading ? "Refreshing…" : "Refresh"}</button>
+        </div>
+      </div>
+      <div className="panel-body flush" style={{ padding: 0 }}>
+        {metrics.loading ? (
+          <div className="state">Loading…</div>
+        ) : metrics.error ? (
+          <div className="state"><strong>{metrics.error.code}</strong><span>{metrics.error.message}</span></div>
+        ) : !m || m.requests === 0 ? (
+          <div className="state"><strong>No traffic yet</strong><span>Once requests reach this project&apos;s deployment, you&apos;ll see request counts, status breakdown, and latency here.</span></div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Metric</th><th style={{ textAlign: "right" }}>Value</th></tr></thead>
+            <tbody>
+              <tr><td>Total requests</td><td className="mono" style={{ textAlign: "right" }}>{m.requests.toLocaleString()}</td></tr>
+              <tr><td><span className="status status-ready"><span className="dot" />2xx</span></td><td className="mono" style={{ textAlign: "right" }}>{m.status2xx.toLocaleString()}</td></tr>
+              <tr><td><span className="status status-none"><span className="dot" />3xx</span></td><td className="mono" style={{ textAlign: "right" }}>{m.status3xx.toLocaleString()}</td></tr>
+              <tr><td><span className="status status-building"><span className="dot" />4xx</span></td><td className="mono" style={{ textAlign: "right" }}>{m.status4xx.toLocaleString()}</td></tr>
+              <tr><td><span className="status status-error"><span className="dot" />5xx</span></td><td className="mono" style={{ textAlign: "right" }}>{m.status5xx.toLocaleString()}</td></tr>
+              <tr><td>Avg latency</td><td className="mono" style={{ textAlign: "right" }}>{Math.round(m.avgLatencyMs)} ms</td></tr>
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div className="panel-foot">Aggregated from the gateway across this project&apos;s active deployment.</div>
+    </section>
+  );
+}
+
+function Database({ slug }: { slug: string }) {
+  const [sql, setSql] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ rows: Record<string, unknown>[]; rowCount: number } | null>(null);
+  const [err, setErr] = useState<{ code: string; message: string } | null>(null);
+  const hasKey = getToken() !== "";
+  const cols = result && result.rows.length > 0 ? Object.keys(result.rows[0]) : [];
+  const shown = result ? result.rows.slice(0, 100) : [];
+
+  async function run() {
+    setBusy(true); setErr(null); setResult(null);
+    const res = await api.runQuery(slug, sql.trim());
+    setBusy(false);
+    if (res.ok) setResult(res.data);
+    else setErr(res.error);
+  }
+
+  return (
+    <div className="stack">
+      <section className="panel">
+        <div className="panel-head"><h3>Database</h3><span className="status status-ready"><span className="dot" />Postgres</span></div>
+        <div className="panel-body">
+          <p className="muted" style={{ marginBottom: "var(--space-md)", maxWidth: "60ch" }}>
+            Every project gets a dedicated managed Postgres database, provisioned on creation. The connection string is shown once at create time (treat it as a secret).
+          </p>
+          <dl className="kv"><dt>Engine</dt><dd className="mono">postgres 16</dd><dt>Isolation</dt><dd>database-per-project</dd></dl>
+        </div>
+        <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h3>Query</h3>
+          {result && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{result.rowCount} row{result.rowCount === 1 ? "" : "s"}</span>}
+        </div>
+        <div className="panel-body stack">
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to run queries</span>}
+          <div className="field">
+            <label>SQL <span className="faint">— read-only SELECT, max 1000 rows</span></label>
+            <textarea
+              className="input mono"
+              placeholder="select * from users limit 50;"
+              value={sql}
+              onChange={(e) => setSql(e.target.value)}
+              rows={4}
+              style={{ height: "auto", padding: "10px 12px", resize: "vertical", lineHeight: 1.6 }}
+            />
+          </div>
+          {err && <span className="status status-error"><span className="dot" />{err.code}: {err.message}</span>}
+          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !sql.trim()} onClick={run}>{busy ? "Running…" : "Run"}</button></div>
+        </div>
+        {result && (
+          <div className="panel-body flush" style={{ padding: 0, borderTop: "1px solid var(--border)" }}>
+            {result.rows.length === 0 ? (
+              <div className="state"><strong>No rows</strong><span>The query returned an empty result set.</span></div>
+            ) : (
+              <>
+                <table className="table">
+                  <thead><tr>{cols.map((c) => <th key={c} className="mono">{c}</th>)}</tr></thead>
+                  <tbody>
+                    {shown.map((rrow, i) => (
+                      <tr key={i}>
+                        {cols.map((c) => {
+                          const v = rrow[c];
+                          return <td key={c} className="mono" style={{ wordBreak: "break-word" }}>{v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</td>;
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {result.rows.length > shown.length && (
+                  <div className="panel-foot">Showing first {shown.length} of {result.rowCount} rows.</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </section>
     </div>
   );
