@@ -14,6 +14,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    networks: [podkit]
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in infra/.env}
     volumes:
@@ -29,11 +30,15 @@ services:
       context: ..
       dockerfile: infra/Dockerfile.controlplane
     restart: unless-stopped
+    networks: [podkit]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       NODE_ENV: production
+      # Shared network so the containerized control-plane reaches app containers
+      # by name (spawned onto it via the mounted Docker socket).
+      PODKIT_APP_NETWORK: podkit
       PODKIT_CP_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       PODKIT_ADMIN_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/postgres
       # Required in production (the control-plane refuses dev defaults):
@@ -54,6 +59,12 @@ services:
       - "${PODKIT_GATEWAY_BIND:-8090}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+# Fixed network name so the control-plane can attach spawned app containers to
+# it by name regardless of the compose project name.
+networks:
+  podkit:
+    name: podkit
 
 volumes:
   pgdata:

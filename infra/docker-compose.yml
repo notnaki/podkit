@@ -6,6 +6,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    networks: [podkit]
     environment:
       POSTGRES_PASSWORD: podkit
     volumes:
@@ -20,6 +21,7 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.controlplane
+    networks: [podkit]
     depends_on:
       postgres:
         condition: service_healthy
@@ -30,11 +32,21 @@ services:
       PODKIT_API_PORT: "8080"
       PODKIT_GATEWAY_PORT: "8090"
       PODKIT_CONSOLE_DIR: /app/apps/cloud-console/dist
+      # Control-plane runs in a container, so it reaches app containers by name
+      # over this shared network (not via the host's loopback). App containers
+      # are spawned onto it via the mounted Docker socket.
+      PODKIT_APP_NETWORK: podkit
     ports:
       - "8080:8080"
       - "8090:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+# Fixed network name so the control-plane can attach spawned app containers to
+# it by name regardless of the compose project name.
+networks:
+  podkit:
+    name: podkit
 
 volumes:
   pgdata:

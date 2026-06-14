@@ -573,8 +573,27 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     return "ok";
   }
 
-  // slug -> current host port of the live container for that project.
-  const routeMap = new Map<string, number>();
+  // When set, app containers join this Docker network and the gateway reaches
+  // them by container name (required when the control-plane itself runs in a
+  // container — the published host port lives on the host's loopback, which is
+  // unreachable from inside the control-plane container). Unset (host-mode:
+  // tests / local dev) => reach the app via the published port on localhost.
+  const appNetwork = process.env.PODKIT_APP_NETWORK || undefined;
+
+  // route key -> the address the gateway dials for the live container.
+  const routeMap = new Map<string, { host: string; port: number }>();
+
+  // Build the gateway target for a freshly-started container: in network mode
+  // dial the container by name on its container port; otherwise the published
+  // host port on localhost.
+  const routeTarget = (
+    containerName: string,
+    containerPort: number,
+    hostPort: number,
+  ): { host: string; port: number } =>
+    appNetwork
+      ? { host: containerName, port: containerPort }
+      : { host: "localhost", port: hostPort };
   // custom domain (hostname, no port) -> project slug.
   const domainMap = new Map<string, string>();
   // names of app containers we started, so close() can tear them down.
@@ -737,6 +756,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       name,
       containerPort: input.containerPort,
       env,
+      network: appNetwork,
     });
     runningContainers.push(name);
 
@@ -751,12 +771,13 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       branchId: input.branchId,
     });
 
+    const target = routeTarget(name, input.containerPort, hostPort);
     if (input.kind === "preview" && input.branchName) {
       const routeKey = slug + "--" + input.branchName;
-      routeMap.set(routeKey, hostPort);
+      routeMap.set(routeKey, target);
       await reapSupersededPreview(slug, input.branchName, name);
     } else {
-      routeMap.set(slug, hostPort);
+      routeMap.set(slug, target);
       await reapSuperseded(slug, name);
     }
 
@@ -835,9 +856,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         slug = domainMap.get(hostname) ?? null;
       }
       if (!slug) return null;
-      const hostPort = routeMap.get(slug);
+      const target = routeMap.get(slug);
       // Thread the resolved slug out so onRequest can attribute the request.
-      return hostPort ? { hostPort, slug } : null;
+      return target ? { host: target.host, hostPort: target.port, slug } : null;
     },
     onRequest: (m) => {
       // Only record for requests that resolved to a known project slug.
@@ -1761,6 +1782,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           name,
           containerPort: target.containerPort,
           env,
+          network: appNetwork,
         });
       } catch {
         return {
@@ -1785,7 +1807,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         containerPort: target.containerPort,
         kind: "rollback",
       });
-      routeMap.set(slug, started.hostPort);
+      routeMap.set(
+        slug,
+        routeTarget(name, target.containerPort, started.hostPort),
+      );
       await reapSuperseded(slug, name);
 
       return {
