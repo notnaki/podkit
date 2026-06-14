@@ -94,6 +94,11 @@ export interface Metrics {
   lastSeen: number | null;
 }
 export interface QueryResult { rows: Record<string, unknown>[]; rowCount: number }
+export interface Branch { id: string; name: string; database: string; createdAt: string }
+export interface CreatedBranch {
+  branch: { id: string; name: string; database: string };
+  connectionString: string;
+}
 
 export const api = {
   health: () => call<{ status: string }>("GET", "/v1/health"),
@@ -166,5 +171,21 @@ export const api = {
     call<unknown>(
       "DELETE",
       `/v1/projects/${encodeURIComponent(slug)}/domains/${encodeURIComponent(domain)}`,
+    ),
+  listBranches: (slug: string) =>
+    call<{ branches: Branch[] }>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/branches`,
+    ),
+  createBranch: (slug: string, name: string) =>
+    call<CreatedBranch>(
+      "POST",
+      `/v1/projects/${encodeURIComponent(slug)}/branches`,
+      { name },
+    ),
+  deleteBranch: (slug: string, name: string) =>
+    call<{ deleted: string }>(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}/branches/${encodeURIComponent(name)}`,
     ),
 };
