@@ -264,10 +264,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           ),
         };
       }
+      // Inject the project's environment variables into the container.
+      const envRows = await store.listEnv(project.id);
+      const env: Record<string, string> = {};
+      for (const row of envRows) {
+        env[row.key] = row.value;
+      }
+
       const { id, hostPort } = await runContainer({
         image: tag,
         name,
         containerPort: b.containerPort,
+        env,
       });
       runningContainers.push(name);
 
@@ -465,6 +473,89 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     };
   });
 
+  router.register(
+    "POST",
+    "/v1/projects/:slug/env",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const b = (body ?? {}) as {
+        key?: string;
+        value?: string;
+        sensitive?: boolean;
+      };
+      if (
+        typeof b.key !== "string" ||
+        b.key.length === 0 ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(b.key)
+      ) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid env key",
+            "key must match ^[A-Za-z_][A-Za-z0-9_]*$",
+          ),
+        };
+      }
+      await store.setEnv({
+        projectId: project.id,
+        key: b.key,
+        value: typeof b.value === "string" ? b.value : "",
+        sensitive: b.sensitive === true,
+      });
+      return { status: 200, body: ok({ key: b.key }) };
+    },
+  );
+
+  router.register("GET", "/v1/projects/:slug/env", async ({ params }) => {
+    const slug = params.slug!;
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return {
+        status: 404,
+        body: fail("E_NOT_FOUND", "unknown project: " + slug),
+      };
+    }
+    const items = await store.listEnv(project.id);
+    return {
+      status: 200,
+      body: ok({
+        env: items.map((item) => ({
+          key: item.key,
+          sensitive: item.sensitive,
+          value: item.sensitive ? null : item.value,
+        })),
+      }),
+    };
+  });
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/env/:key",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const key = params.key!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      await store.deleteEnv({ projectId: project.id, key });
+      return { status: 200, body: ok({ deleted: key }) };
+    },
+  );
+
   const server = createServer(
     async (req: IncomingMessage, res: ServerResponse) => {
       // CORS: the cloud console is a separate origin from the control-plane.
@@ -473,7 +564,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         "access-control-allow-headers",
         "content-type, x-podkit-key, authorization",
       );
-      res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+      res.setHeader(
+        "access-control-allow-methods",
+        "GET, POST, DELETE, OPTIONS",
+      );
       if (req.method === "OPTIONS") {
         res.statusCode = 204;
         res.end();

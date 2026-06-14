@@ -3,7 +3,7 @@ import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
 
-type Method = "GET" | "POST";
+type Method = "GET" | "POST" | "DELETE";
 
 function resolveBase(): string {
   return readAuth()?.url ?? process.env.PODKIT_API_URL ?? "http://localhost:8080";
@@ -86,7 +86,62 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, env, login [--url <url>], logout, whoami";
+
+const ENV_HINT =
+  "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
+
+async function envCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [action, ...envRest] = rest;
+
+  if (action === "set") {
+    const [slug, kv] = envRest;
+    if (!slug) {
+      return fail(new PodkitError("E_BAD_ARGS", "env set requires a slug", ENV_HINT));
+    }
+    if (!kv || !kv.includes("=")) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "env set requires KEY=VALUE", ENV_HINT),
+      );
+    }
+    const eq = kv.indexOf("=");
+    const key = kv.slice(0, eq);
+    const value = kv.slice(eq + 1);
+    const sensitive = envRest.includes("--sensitive");
+    return await callControlPlane("POST", `/v1/projects/${slug}/env`, {
+      key,
+      value,
+      sensitive,
+    });
+  }
+
+  if (action === "list") {
+    const [slug] = envRest;
+    if (!slug) {
+      return fail(new PodkitError("E_BAD_ARGS", "env list requires a slug", ENV_HINT));
+    }
+    return await callControlPlane("GET", `/v1/projects/${slug}/env`);
+  }
+
+  if (action === "rm") {
+    const [slug, key] = envRest;
+    if (!slug) {
+      return fail(new PodkitError("E_BAD_ARGS", "env rm requires a slug", ENV_HINT));
+    }
+    if (!key) {
+      return fail(new PodkitError("E_BAD_ARGS", "env rm requires a key", ENV_HINT));
+    }
+    return await callControlPlane("DELETE", `/v1/projects/${slug}/env/${key}`);
+  }
+
+  return fail(
+    new PodkitError(
+      "E_BAD_ARGS",
+      action ? `Unknown env action: ${action}` : "env requires an action",
+      ENV_HINT,
+    ),
+  );
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -208,6 +263,10 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
         );
       }
       return await callControlPlane("GET", `/v1/projects/${slug}`);
+    }
+
+    if (subcommand === "env") {
+      return await envCommand(rest);
     }
 
     if (subcommand === "login") {

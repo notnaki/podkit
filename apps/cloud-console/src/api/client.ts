@@ -73,6 +73,7 @@ export interface Project {
 export interface Deployment { id?: string; version: string; hostPort?: number; status?: string }
 export interface ProjectDetail { project: Project; latest: Deployment | null; url: string | null }
 export interface CreatedProject { project: Project; database?: string; connectionString?: string }
+export interface EnvVar { key: string; sensitive: boolean; value: string | null }
 
 export const api = {
   health: () => call<{ status: string }>("GET", "/v1/health"),
@@ -93,5 +94,14 @@ export const api = {
       "POST",
       `/v1/projects/${encodeURIComponent(slug)}/deploy`,
       { contextDir, containerPort },
+    ),
+  listEnv: (slug: string) =>
+    call<{ env: EnvVar[] }>("GET", `/v1/projects/${encodeURIComponent(slug)}/env`),
+  setEnv: (slug: string, key: string, value: string, sensitive: boolean) =>
+    call<unknown>("POST", `/v1/projects/${encodeURIComponent(slug)}/env`, { key, value, sensitive }),
+  deleteEnv: (slug: string, key: string) =>
+    call<unknown>(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}/env/${encodeURIComponent(key)}`,
     ),
 };

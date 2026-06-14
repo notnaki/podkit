@@ -28,6 +28,16 @@ export type Store = {
   ) => Promise<
     Array<{ id: string; version: string; hostPort: number; status: string }>
   >;
+  setEnv: (opts: {
+    projectId: string;
+    key: string;
+    value: string;
+    sensitive: boolean;
+  }) => Promise<void>;
+  listEnv: (
+    projectId: string,
+  ) => Promise<Array<{ key: string; value: string; sensitive: boolean }>>;
+  deleteEnv: (opts: { projectId: string; key: string }) => Promise<void>;
   createAccount: (input: {
     email: string;
     passwordHash: string;
@@ -83,6 +93,16 @@ export function createStore(opts: CreateStoreOptions): Store {
         host_port integer,
         status text,
         created_at timestamp DEFAULT now()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_env (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL,
+        key text NOT NULL,
+        value text NOT NULL,
+        sensitive boolean NOT NULL DEFAULT false,
+        UNIQUE (project_id, key)
       )
     `);
     await pool.query(`
@@ -185,6 +205,50 @@ export function createStore(opts: CreateStoreOptions): Store {
       hostPort: r.host_port ?? 0,
       status: r.status ?? "",
     }));
+  }
+
+  async function setEnv(opts: {
+    projectId: string;
+    key: string;
+    value: string;
+    sensitive: boolean;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO project_env (project_id, key, value, sensitive)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (project_id, key)
+       DO UPDATE SET value = EXCLUDED.value, sensitive = EXCLUDED.sensitive`,
+      [opts.projectId, opts.key, opts.value, opts.sensitive],
+    );
+  }
+
+  async function listEnv(
+    projectId: string,
+  ): Promise<Array<{ key: string; value: string; sensitive: boolean }>> {
+    const result = await pool.query<{
+      key: string;
+      value: string;
+      sensitive: boolean;
+    }>(
+      `SELECT key, value, sensitive FROM project_env
+       WHERE project_id = $1 ORDER BY key ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({
+      key: r.key,
+      value: r.value,
+      sensitive: r.sensitive,
+    }));
+  }
+
+  async function deleteEnv(opts: {
+    projectId: string;
+    key: string;
+  }): Promise<void> {
+    await pool.query(
+      `DELETE FROM project_env WHERE project_id = $1 AND key = $2`,
+      [opts.projectId, opts.key],
+    );
   }
 
   async function createAccount(input: {
@@ -314,6 +378,9 @@ export function createStore(opts: CreateStoreOptions): Store {
     getProjectBySlug,
     recordDeployment,
     listDeployments,
+    setEnv,
+    listEnv,
+    deleteEnv,
     createAccount,
     getAccountByEmail,
     getAccountById,
