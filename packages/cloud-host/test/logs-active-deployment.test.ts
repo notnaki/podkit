@@ -20,6 +20,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 let loggedContainerId = "";
 
 vi.mock("@podkit/runtime", () => ({
+  DEFAULT_BASE_IMAGE: "podkit-base:latest",
   buildImage: vi.fn(async () => {}),
   runContainer: vi.fn(async () => ({ id: "unused", hostPort: 0 })),
   stopContainer: vi.fn(async () => {}),

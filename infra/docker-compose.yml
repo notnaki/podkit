@@ -32,6 +32,11 @@ services:
       PODKIT_API_PORT: "8080"
       PODKIT_GATEWAY_PORT: "8090"
       PODKIT_CONSOLE_DIR: /app/apps/cloud-console/dist
+      # Vendored base image standalone one-click app builds build FROM. The
+      # control-plane builds it once at startup (from /app/infra/Dockerfile.base)
+      # if absent, then Docker layer-caches it. Point this at a pre-built/registry
+      # tag (e.g. my-registry/podkit-base:v1.2.3) to skip the in-cluster build.
+      PODKIT_BASE_IMAGE: podkit-base:latest
       # Control-plane runs in a container, so it reaches app containers by name
       # over this shared network (not via the host's loopback). App containers
       # are spawned onto it via the mounted Docker socket.

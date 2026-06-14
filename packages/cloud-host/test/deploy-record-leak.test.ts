@@ -16,6 +16,7 @@ const stopped: string[] = [];
 let startedName = "";
 
 vi.mock("@podkit/runtime", () => ({
+  DEFAULT_BASE_IMAGE: "podkit-base:latest",
   buildImage: vi.fn(async () => {}),
   runContainer: vi.fn(async (opts: { name: string }) => {
     startedName = opts.name;

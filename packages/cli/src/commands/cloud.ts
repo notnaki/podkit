@@ -310,16 +310,22 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug> [--contextDir=<dir>] [--containerPort=<port>] [--appSubpath=<path>], url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
 
-// `deploy` tars the context dir (excluding node_modules/.git/.podkit/dist) and
-// streams it to the control-plane, which extracts it into an isolated dir and
-// builds. A Dockerfile app deploys standalone; a podkit buildpack app (no
-// Dockerfile) needs the FULL monorepo in the tarball with the app under
-// --appSubpath (e.g. apps/myapp) — otherwise the build fails with "no
-// Dockerfile and not a podkit app".
+// `deploy` is one-click: from your app directory, run `podkit cloud deploy <slug>`
+// with NO other flags. The CLI tars the current directory (excluding
+// node_modules/.git/.podkit/dist), streams it to the control-plane, and the
+// control-plane builds a standalone podkit app (no Dockerfile needed) on the
+// vendored base image. All flags are OPTIONAL:
+//   --contextDir   directory to deploy (default: current directory)
+//   --containerPort the app's port inside the container (default: 3000 — the
+//                   podkit convention; standalone apps are locked to it, add an
+//                   explicit Dockerfile to opt out)
+//   --appSubpath   ONLY for monorepo deploys: path to the app within a full
+//                  monorepo tarball (e.g. apps/myapp). Omit for standalone apps.
+// An explicit Dockerfile in the context always wins (full opt-out).
 const DEPLOY_HINT =
-  "podkit cloud deploy <slug> [--contextDir=<dir>] [--containerPort=<port>] [--appSubpath=apps/myapp]";
+  "podkit cloud deploy <slug>  (one-click; all flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=apps/myapp])";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";

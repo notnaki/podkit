@@ -1,0 +1,26 @@
+# Vendored "base" image for the podkit cloud: the FULL monorepo with every
+# @podkit/* package + node_modules preinstalled.
+#
+# Standalone app builds (the Vercel-like one-click path) build FROM this image
+# (tagged podkit-base:latest, override via PODKIT_BASE_IMAGE) so they never
+# rebuild the framework — they only install their own extra deps and run the
+# production build. The control-plane builds this once at startup (see
+# ensureBaseImage in cloud-host/src/host.ts) and Docker layer-caches it.
+#
+# The build context is the repo root (see the build invocation in host.ts, which
+# points at PODKIT_CONTROL_PLANE_ROOT). node_modules are excluded via
+# .dockerignore so pnpm reinstalls them inside the linux image.
+#
+# This image is a base LAYER only: no CMD. Standalone Dockerfiles add their own
+# build/start steps on top.
+FROM node:22
+
+# Enable corepack-managed pnpm.
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy the whole repo (node_modules excluded via .dockerignore) and install the
+# full workspace so every @podkit/* package is present and linked.
+COPY . .
+RUN pnpm install --frozen-lockfile=false
