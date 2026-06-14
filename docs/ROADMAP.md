@@ -49,16 +49,21 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Deployment history + rollback** (PR #18): deployments persist `container_port`+`kind`; `GET /v1/projects/:slug/deployments` (newest-first, active flag) + `POST /v1/projects/:slug/rollback {deploymentId}` re-runs a prior version's immutable image as a new deployment and reroutes instantly. Console Deployments tab is a full history table with per-row Rollback/Current; `podkit cloud deployments|rollback`.
 - **Runtime logs** (PR #19): `GET /v1/projects/:slug/logs[?deploymentId=]` returns a deployment's container logs (`docker logs` of the active deployment by default). **Auth-required** (logs can contain secrets) — unlike the other open read endpoints. Console **Logs** tab (terminal-style, refresh) + `podkit cloud logs <slug>`.
 - **Per-project scoped DB roles** (PR #20): `provisionDatabase` now mints a **non-superuser per-project login role** (`<db>_app`) that owns only its own database + `public` schema; PUBLIC `CONNECT` is revoked so a tenant's creds can't reach any other tenant's DB. The returned connectionString carries the scoped role creds (no more admin/superuser handed to tenants); re-provision rotates the password; `dropDatabase` can drop the role too. **Note:** projects provisioned before this still have admin creds in any DATABASE_URL they stored — re-provision/rotate to fix.
+- **Security hardening** (PR #22, multi-agent audit→fix workflow): (1) **multi-tenant ownership enforcement** — every project-scoped endpoint now requires the bearer account to OWN the project (machine key = full access), 403 `E_FORBIDDEN` otherwise; `GET /v1/projects` filters to the caller; **create binds owner to the authenticated account** (not the request body — closes a lockout + spoof hole). (2) error-message masking (no stack/cred leakage in 500s). (3) container resource limits (`--memory/--cpus/--pids-limit/--ulimit`). (4) request body-size cap (1 MiB → 413).
+- **CLI/console/lifecycle improvements** (PR #21, worktree-isolated workflow): CLI semantic exit codes + `--quiet`; `podkit cloud status <slug>`; **`DELETE /v1/projects/:slug`** full teardown (stop container, drop DB+role, cascade env/domains/deployments) + working console **Delete** button; "deployed N ago" age on project cards.
 
 ## 📋 To do — cloud hardening (toward production)
 
-1. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
-3. **Secrets-at-rest encryption** — env values marked sensitive are stored plaintext in control-plane Postgres; encrypt at rest.
-4. **Domain ownership verification + TLS** — DNS TXT challenge to prove domain ownership, then automatic cert issuance (ACME) for custom domains.
-5. **Standalone buildpack** — buildpack assumes the monorepo; support deploying podkit apps that depend on published packages.
-6. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
-7. **Stop superseded containers on deploy/rollback** — a new deploy/rollback leaves the prior container running (only torn down on shutdown); reap superseded containers to reclaim resources.
-8. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
+1. **Secrets-at-rest encryption** — sensitive env values + the per-project connection string are stored/returned in plaintext; encrypt at rest + redesign secret injection (avoid plaintext env at runtime).
+2. **Token `exp`/revocation + device-flow rate-limiting** — Bearer tokens are non-expiring and unrevocable; add `exp`/`iat` + a revocation table; raise userCode entropy and rate-limit `/cli/approve`.
+3. **Deploy build-context sandboxing** — validate/stage `contextDir` under a builds root to prevent path traversal during deploy; tighten slug + appSubpath validation.
+4. **CORS allowlist** — replace the wildcard with a configured console-origin allowlist.
+5. **docker.sock host-escape** — the control-plane mounts the host Docker socket; move to a brokered build/run service or orchestrator. Container hardening: `--cap-drop`, `--read-only`, 127.0.0.1 port binding, non-root USER, pinned image digests.
+6. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains.
+7. **Standalone buildpack** — support apps outside the monorepo (published packages).
+8. **Prod app bundling** — containers run the dev server; add an optimized production build/runtime, cold-start, edge.
+9. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources.
+10. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
 
