@@ -38,26 +38,31 @@ export function isPodkitApp(appDir: string): boolean {
  * for `pnpm install`). We then `WORKDIR` into the app subpath so the podkit dev
  * server, which uses `process.cwd()` as the app root, resolves the right routes.
  *
- * MVP note: running the podkit dev server is the runtime for now; producing a
- * pre-built production bundle is a later optimization.
+ * Production runtime: after install, we run a production build (Vite client +
+ * SSR builds, emitting hashed client assets and pre-compiled SSR route modules
+ * into <app>/.podkit/build) and the container CMD runs the Vite-free `start`
+ * (prod) server against that build output.
  */
 export function generatePodkitDockerfile(opts: GeneratePodkitDockerfileOptions): string {
   const port = opts.port ?? 3000;
+  const appBuildDir = `/app/${opts.appSubpath}/.podkit/build`;
   // Build steps run as root (corepack/pnpm need to write into the global store
-  // and node_modules). Once install completes, hand ownership of /app to the
-  // unprivileged `node` user (uid 1000, present in the node:22 image) and drop
-  // privileges via USER so the tenant app process never runs as root. Port
-  // ${port} is non-privileged (>1024), so binding works without root.
+  // and node_modules; the production build writes into .podkit/build). Once the
+  // build completes, hand ownership of /app to the unprivileged `node` user
+  // (uid 1000, present in the node:22 image) and drop privileges via USER so the
+  // tenant app process never runs as root. Port ${port} is non-privileged
+  // (>1024), so binding works without root.
   return `FROM node:22
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY . .
 RUN pnpm install --frozen-lockfile=false
+RUN node /app/packages/cli/src/bin.ts build --appRoot /app/${opts.appSubpath} --outDir ${appBuildDir}
 RUN chown -R node:node /app
 WORKDIR /app/${opts.appSubpath}
 EXPOSE ${port}
 USER node
-CMD ["node","/app/packages/cli/src/bin.ts","dev","--port","${port}"]
+CMD ["node","/app/packages/cli/src/bin.ts","start","--port","${port}"]
 `;
 }
 

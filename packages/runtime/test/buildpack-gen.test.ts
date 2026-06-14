@@ -24,7 +24,7 @@ describe("buildpack generator", () => {
     expect(dockerfile).toContain("pnpm install");
     expect(dockerfile).toContain("WORKDIR /app/examples/hello");
     expect(dockerfile).toContain(
-      'CMD ["node","/app/packages/cli/src/bin.ts","dev","--port","3000"]',
+      'CMD ["node","/app/packages/cli/src/bin.ts","start","--port","3000"]',
     );
   });
 

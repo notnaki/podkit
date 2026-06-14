@@ -1,0 +1,159 @@
+import { build as viteBuild } from "vite";
+import react from "@vitejs/plugin-react";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import { buildRouteTable } from "../routing/discover.ts";
+import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
+
+function listFiles(dir: string, root = dir): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listFiles(full, root));
+    else out.push(relative(root, full));
+  }
+  return out;
+}
+
+/** Dependencies that must stay external to the SSR bundle (resolved at runtime). */
+const SSR_EXTERNAL = ["react", "react-dom", "react-dom/server", "react/jsx-runtime"];
+
+/**
+ * Map a source route file to a filesystem-safe SSR output slug. Rollup/Vite
+ * rewrite special characters (e.g. `[`/`]`) in entry names, which would make the
+ * emitted file name diverge from what we record in the manifest. By replacing
+ * those characters ourselves up front, the input key, emitted file name, and
+ * manifest entry stay in lockstep.
+ */
+function ssrSlug(file: string): string {
+  return file.replace(/\.(tsx|jsx)$/, "").replace(/[\[\]]/g, "_").replace(/\.\.\./g, "___");
+}
+
+export interface BuildAppOptions {
+  /** Skip building (used in tests to assert pure planning). Currently unused. */
+  skip?: boolean;
+}
+
+export interface BuildAppResult {
+  outDir: string;
+  routeCount: number;
+  clientEntry: string;
+  manifest: BuildManifest;
+}
+
+/**
+ * Produce a production build of a podkit app.
+ *
+ * Three steps:
+ *  1. Vite client build: bundles app/entry-client.tsx into hashed assets under
+ *     <outDir>/client with a manifest.json (drives the hashed <script> path).
+ *  2. Vite SSR build: pre-compiles every discovered route module into an ESM
+ *     file under <outDir>/server/routes/<slug>-SSR.js, with react/react-dom
+ *     kept external. The prod server dynamically imports these directly — no
+ *     ssrLoadModule, no Vite at runtime.
+ *  3. Writes <outDir>/build-manifest.json describing routes + the hashed client
+ *     entry so the prod server can match routes and emit the correct script tag.
+ */
+export async function buildApp(
+  appRoot: string,
+  outDir: string,
+  _opts: BuildAppOptions = {},
+): Promise<BuildAppResult> {
+  const routesDir = join(appRoot, "app", "routes");
+  const table = buildRouteTable(listFiles(routesDir).map((f) => f.split("\\").join("/")));
+
+  const clientOutDir = join(outDir, "client");
+  const serverOutDir = join(outDir, "server");
+
+  const clientEntrySrc = join(appRoot, "app", "entry-client.tsx");
+
+  // (1) Client build — single shared hydration entry, hashed + manifest.
+  await viteBuild({
+    root: appRoot,
+    logLevel: "warn",
+    plugins: [react()],
+    build: {
+      outDir: clientOutDir,
+      emptyOutDir: true,
+      manifest: true,
+      ssr: false,
+      rollupOptions: {
+        input: clientEntrySrc,
+        output: {
+          entryFileNames: "entry-[hash].js",
+          chunkFileNames: "chunk-[hash].js",
+          assetFileNames: "asset-[hash][extname]",
+        },
+      },
+    },
+  });
+
+  // (2) SSR build — one pre-compiled module per route file. react/react-dom
+  // stay external so the runtime resolves the real (singleton) copies.
+  const routeInputs: Record<string, string> = {};
+  for (const route of table) {
+    routeInputs[`routes/${ssrSlug(route.file)}-SSR`] = join(routesDir, route.file);
+  }
+
+  if (Object.keys(routeInputs).length > 0) {
+    await viteBuild({
+      root: appRoot,
+      logLevel: "warn",
+      plugins: [react()],
+      build: {
+        outDir: serverOutDir,
+        emptyOutDir: true,
+        ssr: true,
+        manifest: false,
+        rollupOptions: {
+          input: routeInputs,
+          external: SSR_EXTERNAL,
+          output: {
+            format: "es",
+            entryFileNames: "[name].js",
+            chunkFileNames: "chunks/[name]-[hash].js",
+          },
+        },
+      },
+    });
+  }
+
+  // (4) Resolve the hashed client entry from Vite's client manifest.
+  const clientManifestPath = join(clientOutDir, ".vite", "manifest.json");
+  const clientManifest = JSON.parse(readFileSync(clientManifestPath, "utf8")) as Record<
+    string,
+    { file: string; isEntry?: boolean }
+  >;
+  let entryFile: string | undefined;
+  for (const value of Object.values(clientManifest)) {
+    if (value.isEntry) {
+      entryFile = value.file;
+      break;
+    }
+  }
+  if (!entryFile) {
+    throw new Error("buildApp: could not find client entry in Vite manifest");
+  }
+  const clientEntry = `/client/${entryFile}`;
+
+  // (5) Write the build manifest used by the prod server.
+  const routes: BuildManifestRoute[] = table.map((route) => ({
+    pattern: route.pattern,
+    kind: route.kind,
+    file: route.file,
+    params: route.params,
+    serverFile: `routes/${ssrSlug(route.file)}-SSR.js`,
+  }));
+
+  const manifest: BuildManifest = {
+    routes,
+    clientDir: "client",
+    serverDir: "server",
+    clientEntry,
+  };
+
+  writeManifest(join(outDir, "build-manifest.json"), manifest);
+
+  return { outDir, routeCount: table.length, clientEntry, manifest };
+}
