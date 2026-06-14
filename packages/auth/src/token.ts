@@ -11,9 +11,15 @@ function computeSig(body: string, secret: string): string {
 
 export function signToken(
   payload: Record<string, unknown>,
-  secret: string
+  secret: string,
+  ttlSeconds?: number
 ): string {
-  const body = base64url(JSON.stringify(payload));
+  let finalPayload = payload;
+  if (ttlSeconds !== undefined) {
+    const iat = Math.floor(Date.now() / 1000);
+    finalPayload = { ...payload, iat, exp: iat + ttlSeconds };
+  }
+  const body = base64url(JSON.stringify(finalPayload));
   const sig = computeSig(body, secret);
   return `${body}.${sig}`;
 }
@@ -46,7 +52,15 @@ export function verifyToken(
       return null;
     }
 
-    return parsed as Record<string, unknown>;
+    const payload = parsed as Record<string, unknown>;
+
+    const exp = payload["exp"];
+    if (typeof exp === "number") {
+      const now = Math.floor(Date.now() / 1000);
+      if (now > exp) return null;
+    }
+
+    return payload;
   } catch {
     return null;
   }
@@ -54,7 +68,8 @@ export function verifyToken(
 
 export function issueAgentToken(
   payload: { userId: string; scopes: string[] },
-  secret: string
+  secret: string,
+  ttlSeconds?: number
 ): string {
-  return signToken({ ...payload, kind: "agent" }, secret);
+  return signToken({ ...payload, kind: "agent" }, secret, ttlSeconds);
 }

@@ -16,6 +16,7 @@ import { createSink, query, aggregate } from "@podkit/telemetry";
 import { listTopics, getDoc, describeProject } from "@podkit/docs";
 import { createRouter, sendJson, readJson } from "./router.ts";
 import { requireApiKey } from "./apikey.ts";
+import { parseCorsOrigins, resolveCorsHeader } from "./cors.ts";
 
 function ok(data: unknown) {
   return { ok: true, data };
@@ -29,6 +30,7 @@ export function createControlPlane(opts: {
   projectRoot?: string;
   apiKey?: string;
   corsOrigin?: string;
+  corsOrigins?: string;
 }): { listen(port: number): Promise<{ url: string }>; close(): Promise<void> } {
   const projectRoot = opts.projectRoot ?? process.cwd();
   const deploysRoot = join(projectRoot, ".podkit/deploys");
@@ -140,11 +142,29 @@ export function createControlPlane(opts: {
     return { status: 200, body: ok(rollback(deploysRoot)) };
   });
 
-  const corsOrigin = opts.corsOrigin ?? "*";
+  // Optional CORS allowlist. When PODKIT_CORS_ORIGINS (or opts.corsOrigins) is
+  // set, only those Origins are reflected; otherwise we keep the legacy static
+  // value (opts.corsOrigin, default "*") for backward compatibility.
+  const corsOriginsInput =
+    opts.corsOrigins ?? process.env.PODKIT_CORS_ORIGINS ?? undefined;
+  const allowedOrigins = parseCorsOrigins(corsOriginsInput);
+  const staticCorsOrigin = opts.corsOrigin ?? "*";
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // CORS: the dashboard is a separate origin from the control-plane.
-    res.setHeader("access-control-allow-origin", corsOrigin);
+    const requestOrigin = Array.isArray(req.headers.origin)
+      ? req.headers.origin[0]
+      : req.headers.origin;
+    if (allowedOrigins === null) {
+      // No allowlist: preserve the historic static behavior.
+      res.setHeader("access-control-allow-origin", staticCorsOrigin);
+    } else {
+      const resolved = resolveCorsHeader(requestOrigin, allowedOrigins);
+      if (resolved.vary) res.setHeader("vary", "Origin");
+      if (resolved.origin !== null) {
+        res.setHeader("access-control-allow-origin", resolved.origin);
+      }
+    }
     res.setHeader("access-control-allow-headers", "content-type, x-podkit-key");
     res.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
     if (req.method === "OPTIONS") {

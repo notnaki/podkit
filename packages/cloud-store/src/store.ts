@@ -1,4 +1,6 @@
 import { Pool } from "pg";
+import { resolveSecretsKey } from "@podkit/auth";
+import { encryptValue, decryptValue } from "./crypto.ts";
 
 export type CreateStoreOptions = {
   connectionString: string;
@@ -101,6 +103,11 @@ export type Store = {
 
 export function createStore(opts: CreateStoreOptions): Store {
   const pool = new Pool({ connectionString: opts.connectionString });
+
+  // Resolve the secrets-at-rest key once at store creation. When unset (dev),
+  // encryption is disabled and ENV values are stored/read as plaintext. In
+  // production resolveSecretsKey throws if the key is missing.
+  const secretsKey = resolveSecretsKey();
 
   async function migrate(): Promise<void> {
     await pool.query(`
@@ -327,12 +334,16 @@ export function createStore(opts: CreateStoreOptions): Store {
     value: string;
     sensitive: boolean;
   }): Promise<void> {
+    // Encrypt at rest when a key is available; otherwise store plaintext.
+    const storedValue = secretsKey
+      ? encryptValue(opts.value, secretsKey)
+      : opts.value;
     await pool.query(
       `INSERT INTO project_env (project_id, key, value, sensitive)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (project_id, key)
        DO UPDATE SET value = EXCLUDED.value, sensitive = EXCLUDED.sensitive`,
-      [opts.projectId, opts.key, opts.value, opts.sensitive],
+      [opts.projectId, opts.key, storedValue, opts.sensitive],
     );
   }
 
@@ -350,7 +361,9 @@ export function createStore(opts: CreateStoreOptions): Store {
     );
     return result.rows.map((r) => ({
       key: r.key,
-      value: r.value,
+      // decryptValue passes through legacy plaintext (no enc: prefix) and
+      // degrades gracefully when the key is missing/wrong.
+      value: secretsKey ? decryptValue(r.value, secretsKey) : r.value,
       sensitive: r.sensitive,
     }));
   }

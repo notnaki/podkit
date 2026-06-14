@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { Pool } from "pg";
 import { createStore } from "../src/index.ts";
 import type { Store } from "../src/index.ts";
+import { encryptValue, decryptValue } from "../src/crypto.ts";
+import { resolveSecretsKey } from "@podkit/auth";
 
 const containerName = `podkit-store-env-${randomBytes(4).toString("hex")}`;
 
@@ -11,6 +14,7 @@ function docker(args: Array<string>): string {
 }
 
 let store: Store;
+let connectionString: string;
 
 beforeAll(async () => {
   docker([
@@ -34,7 +38,7 @@ beforeAll(async () => {
     throw new Error(`could not parse host port from: ${portLine}`);
   }
 
-  const connectionString = `postgres://postgres:pk@localhost:${hostPort}/postgres`;
+  connectionString = `postgres://postgres:pk@localhost:${hostPort}/postgres`;
   store = createStore({ connectionString });
 
   let ready = false;
@@ -124,4 +128,128 @@ describe("cloud-store project env", () => {
     },
     60000,
   );
+});
+
+describe("cloud-store project env encryption", () => {
+  const KEY_HEX = randomBytes(32).toString("hex");
+
+  function withKey<T>(fn: () => T): T {
+    const prev = process.env.PODKIT_SECRETS_KEY;
+    process.env.PODKIT_SECRETS_KEY = KEY_HEX;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env.PODKIT_SECRETS_KEY;
+      else process.env.PODKIT_SECRETS_KEY = prev;
+    }
+  }
+
+  it(
+    "encrypts sensitive values at rest when key available and decrypts on read",
+    async () => {
+      const encStore = withKey(() => createStore({ connectionString }));
+      try {
+        const project = await encStore.createProject({
+          slug: `proj-${randomBytes(3).toString("hex")}`,
+          owner: "jr.nuhnaci@gmail.com",
+        });
+
+        await encStore.setEnv({
+          projectId: project.id,
+          key: "API_KEY",
+          value: "secret-token-12345",
+          sensitive: true,
+        });
+
+        // Round-trip via the store returns plaintext.
+        const env = await encStore.listEnv(project.id);
+        const apiKey = env.find((e) => e.key === "API_KEY");
+        expect(apiKey?.value).toBe("secret-token-12345");
+
+        // At rest the raw column is ciphertext, not plaintext.
+        const pool = new Pool({ connectionString });
+        try {
+          const raw = await pool.query<{ value: string }>(
+            "SELECT value FROM project_env WHERE project_id = $1 AND key = $2",
+            [project.id, "API_KEY"],
+          );
+          expect(raw.rows[0].value.startsWith("enc:v1:")).toBe(true);
+          expect(raw.rows[0].value).not.toContain("secret-token-12345");
+        } finally {
+          await pool.end();
+        }
+      } finally {
+        await encStore.close();
+      }
+    },
+    60000,
+  );
+
+  it(
+    "backward-compat: reads legacy plaintext rows not prefixed with enc:v1:",
+    async () => {
+      const encStore = withKey(() => createStore({ connectionString }));
+      const pool = new Pool({ connectionString });
+      try {
+        const project = await encStore.createProject({
+          slug: `proj-${randomBytes(3).toString("hex")}`,
+          owner: "jr.nuhnaci@gmail.com",
+        });
+
+        // Direct insert bypasses encryption, simulating a legacy row.
+        await pool.query(
+          "INSERT INTO project_env (project_id, key, value, sensitive) VALUES ($1, $2, $3, $4)",
+          [project.id, "LEGACY_VAR", "plaintext-value", false],
+        );
+
+        const env = await encStore.listEnv(project.id);
+        const legacy = env.find((e) => e.key === "LEGACY_VAR");
+        expect(legacy?.value).toBe("plaintext-value");
+      } finally {
+        await pool.end();
+        await encStore.close();
+      }
+    },
+    60000,
+  );
+
+  it("crypto round-trips and passes through legacy plaintext / wrong key", () => {
+    const key = randomBytes(32);
+    const enc = encryptValue("hello-world", key);
+    expect(enc.startsWith("enc:v1:")).toBe(true);
+    expect(decryptValue(enc, key)).toBe("hello-world");
+
+    // Non-prefixed values pass through unchanged.
+    expect(decryptValue("plain", key)).toBe("plain");
+
+    // Wrong key degrades gracefully (returns stored value, no throw).
+    const otherKey = randomBytes(32);
+    expect(decryptValue(enc, otherKey)).toBe(enc);
+  });
+
+  it("resolveSecretsKey validates key format and dev fallback", () => {
+    const prev = process.env.PODKIT_SECRETS_KEY;
+    const prevNodeEnv = process.env.NODE_ENV;
+    try {
+      // Valid 64-hex key resolves to a 32-byte buffer.
+      process.env.PODKIT_SECRETS_KEY = "a".repeat(64);
+      const key = resolveSecretsKey();
+      expect(key).not.toBeNull();
+      expect(key?.length).toBe(32);
+
+      // Invalid length throws.
+      process.env.PODKIT_SECRETS_KEY = "deadbeef";
+      expect(() => resolveSecretsKey()).toThrow();
+
+      // Unset in non-production returns null (encryption disabled).
+      delete process.env.PODKIT_SECRETS_KEY;
+      process.env.NODE_ENV = "test";
+      expect(resolveSecretsKey()).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.PODKIT_SECRETS_KEY;
+      else process.env.PODKIT_SECRETS_KEY = prev;
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+    }
+  });
 });
