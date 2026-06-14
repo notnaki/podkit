@@ -799,6 +799,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     containerPort: number;
     appSubpath?: string;
     extraEnv?: Record<string, string>;
+    kind?: string;
+    branchId?: string | null;
+    branchName?: string;
   }): Promise<DeployResult> {
     const extractDir = join(input.extractParent, "extracted");
     try {
@@ -821,8 +824,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         contextDir: extractDir,
         appSubpath: input.appSubpath,
         containerPort: input.containerPort,
-        kind: "deploy",
-        branchId: null,
+        kind: input.kind ?? "deploy",
+        branchId: input.branchId ?? null,
+        branchName: input.branchName,
         extraEnv: input.extraEnv,
       });
     } finally {
@@ -2352,6 +2356,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       slug: string;
       appSubpath: string | null;
       containerPort: string | null;
+      branchName: string | null;
     },
   ): Promise<void> {
     // Reject helper for the pre-stream checks (auth/ownership/validation). We
@@ -2426,6 +2431,51 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     if (access === "unauth") return reject(401, unauthorized().body);
     if (access === "forbidden") return reject(403, forbidden().body);
 
+    // (4) Optional preview target: when ?branchName is present this is a preview
+    // deploy against that DB branch (its own URL, branch-scoped DATABASE_URL).
+    // Resolve it BEFORE streaming so a bad branch fails fast without an upload.
+    let previewKind: string | undefined;
+    let previewBranchId: string | undefined;
+    let previewBranchName: string | undefined;
+    let previewExtraEnv: Record<string, string> | undefined;
+    if (input.branchName !== null && input.branchName !== "") {
+      if (!isValidBranchName(input.branchName)) {
+        return reject(
+          400,
+          fail(
+            "E_BAD_ARGS",
+            "invalid branchName",
+            "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$ (no '--')",
+          ),
+        );
+      }
+      const branch = await store.getBranchByName(project.id, input.branchName);
+      if (!branch) {
+        return reject(
+          404,
+          fail(
+            "E_NOT_FOUND",
+            "unknown branch: " + input.branchName,
+            "create it first: podkit cloud branches create " +
+              input.slug +
+              " " +
+              input.branchName,
+          ),
+        );
+      }
+      const branchConn = await store.getBranchConnectionString(branch.id);
+      if (!branchConn) {
+        return reject(
+          400,
+          fail("E_BRANCH_FAILED", "branch has no stored connection string"),
+        );
+      }
+      previewKind = "preview";
+      previewBranchId = branch.id;
+      previewBranchName = input.branchName;
+      previewExtraEnv = { DATABASE_URL: branchConn };
+    }
+
     // Create a fresh per-upload directory under the (projectId-scoped) builds
     // root. mkdtemp guarantees a unique name so concurrent uploads never collide.
     let extractParent: string;
@@ -2480,6 +2530,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         projectId: project.id,
         containerPort,
         appSubpath,
+        kind: previewKind,
+        branchId: previewBranchId,
+        branchName: previewBranchName,
+        extraEnv: previewExtraEnv,
       });
     } catch {
       // Defensive: extractAndBuild already cleans up, but guard against an
@@ -2499,13 +2553,17 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         fail(result.error.code, result.error.message, result.error.hint),
       );
     }
+    const routeKey = previewBranchName
+      ? input.slug + "--" + previewBranchName
+      : input.slug;
     return sendJson(
       res,
       200,
       ok({
         version: result.version,
         hostPort: result.hostPort,
-        url: gatewayUrl + "/_p/" + input.slug + "/",
+        branchName: previewBranchName,
+        url: gatewayUrl + "/_p/" + routeKey + "/",
       }),
     );
   }
@@ -2609,6 +2667,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
             slug: decodeURIComponent(uploadMatch[1]!),
             appSubpath: url.searchParams.get("appSubpath"),
             containerPort: url.searchParams.get("containerPort"),
+            branchName: url.searchParams.get("branchName"),
           });
           return;
         }
