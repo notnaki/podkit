@@ -3,7 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, createReadStream, statSync, realpathSync } from "node:fs";
 import { join, resolve, extname, relative, isAbsolute, sep } from "node:path";
 import { createStore } from "@podkit/cloud-store";
@@ -53,6 +53,10 @@ export type Cloud = {
   }) => Promise<{ apiUrl: string; gatewayUrl: string }>;
   close: () => Promise<void>;
 };
+
+// Token TTL constants (seconds).
+const ACCOUNT_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days (web account/session tokens)
+const CLI_TOKEN_TTL = 90 * 24 * 60 * 60; // 90 days (CLI/automation tokens)
 
 function ok(data: unknown) {
   return { ok: true, data };
@@ -267,6 +271,13 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     const token = match[1]!;
     const payload = verifyToken(token, authSecret);
     if (!payload) return null;
+    // Revocation check (after signature/expiry so we don't query the DB for
+    // invalid tokens). Backward-compatible: tokens minted before this feature
+    // have no jti, so the check is skipped and they keep working.
+    const jti = payload["jti"];
+    if (typeof jti === "string" && (await store.isTokenRevoked(jti))) {
+      return null;
+    }
     const accountId = payload["accountId"];
     if (typeof accountId !== "string") return null;
     return { accountId };
@@ -558,8 +569,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
     const token = signToken(
-      { accountId: account.id, email: account.email },
+      { accountId: account.id, email: account.email, jti: randomUUID() },
       authSecret,
+      ACCOUNT_TOKEN_TTL,
     );
     return {
       status: 200,
@@ -583,8 +595,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
     const token = signToken(
-      { accountId: account.id, email: account.email },
+      { accountId: account.id, email: account.email, jti: randomUUID() },
       authSecret,
+      ACCOUNT_TOKEN_TTL,
     );
     return {
       status: 200,
@@ -598,6 +611,38 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     const account = await store.getAccountById(auth.accountId);
     if (!account) return unauthorized();
     return { status: 200, body: ok({ account }) };
+  });
+
+  router.register("POST", "/v1/auth/logout", async ({ headers }) => {
+    // Logout requires a currently-valid bearer token; we then revoke it by jti.
+    const auth = await accountFromAuth(headers);
+    if (!auth) return unauthorized();
+    const raw = headers["authorization"];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof value !== "string") return unauthorized();
+    const match = /^Bearer\s+(.+)$/i.exec(value.trim());
+    if (!match) return unauthorized();
+    const payload = verifyToken(match[1]!, authSecret);
+    if (!payload) return unauthorized();
+    const jti = payload["jti"];
+    const exp = payload["exp"];
+    // Old tokens (no jti) cannot be revoked; report a graceful no-op so clients
+    // don't treat logout as an error.
+    if (typeof jti !== "string") {
+      return {
+        status: 200,
+        body: ok({ revoked: false, message: "token has no jti, cannot revoke" }),
+      };
+    }
+    if (typeof exp !== "number") {
+      return {
+        status: 400,
+        body: fail("E_BAD_ARGS", "token has no exp claim"),
+      };
+    }
+    // Store the revocation with the token's own expiry so the row is self-GC'able.
+    await store.revokeToken(jti, new Date(exp * 1000));
+    return { status: 200, body: ok({ revoked: true }) };
   });
 
   router.register("POST", "/v1/auth/cli/start", async () => {
@@ -658,8 +703,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
     const token = signToken(
-      { accountId: auth.accountId, cli: true },
+      { accountId: auth.accountId, cli: true, jti: randomUUID() },
       authSecret,
+      CLI_TOKEN_TTL,
     );
     const approved = await store.approveCliSession({
       userCode: b.userCode,

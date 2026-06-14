@@ -136,7 +136,7 @@ describe("runContainer resource limits (arg-level)", () => {
       ) => {
         calls.push({ cmd, args });
         // `docker run` returns the container id on stdout; `docker port` returns a host:port line.
-        const stdout = args[0] === "run" ? "deadbeef\n" : "0.0.0.0:54321\n";
+        const stdout = args[0] === "run" ? "deadbeef\n" : "127.0.0.1:54321\n";
         cb(null, { stdout, stderr: "" });
       },
     }));
@@ -183,5 +183,25 @@ describe("runContainer resource limits (arg-level)", () => {
     // Other defaults remain intact.
     expect(args[args.indexOf("--cpus") + 1]).toBe("0.5");
     expect(args[args.indexOf("--pids-limit") + 1]).toBe("512");
+  });
+
+  it("includes hardening flags (cap-drop, security-opt, port binding) in docker run argv", async () => {
+    const args = await captureRunArgs({
+      image: "podkit-rt-test:latest",
+      name: "podkit-rt-hardened",
+      containerPort: 8080,
+    });
+
+    // Check --cap-drop ALL
+    expect(args).toContain("--cap-drop");
+    expect(args[args.indexOf("--cap-drop") + 1]).toBe("ALL");
+
+    // Check --security-opt no-new-privileges
+    expect(args).toContain("--security-opt");
+    expect(args[args.indexOf("--security-opt") + 1]).toBe("no-new-privileges");
+
+    // Check -p binding to 127.0.0.1 only
+    expect(args).toContain("-p");
+    expect(args[args.indexOf("-p") + 1]).toBe("127.0.0.1:0:8080");
   });
 });

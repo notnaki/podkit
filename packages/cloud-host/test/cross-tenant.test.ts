@@ -15,6 +15,39 @@ let pgContainer = "";
 let connectionString = "";
 let cloud: ReturnType<typeof createCloud> | null = null;
 let apiUrl = "";
+// Repository prefix of any image this suite's project could produce. The slug
+// carries a per-run random suffix (`xt-<suffix>`), so this prefix is unique to
+// this run and never collides with a parallel run's images.
+let imagePrefix = "";
+
+// Best-effort, non-fatal cleanup of Docker images this suite built. Today every
+// deploy in this suite is a 403 (so no image is built), but this guards against
+// future changes that do build, and removes only this run's uniquely-suffixed
+// prefix. Failures are swallowed so cleanup never fails the suite.
+async function cleanupImages(repositoryPrefix: string): Promise<void> {
+  if (!repositoryPrefix) return;
+  try {
+    const { stdout } = await execFileAsync("docker", [
+      "images",
+      "--format",
+      "{{.Repository}}:{{.Tag}}",
+    ]);
+    const toRemove = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((img) => img.startsWith(repositoryPrefix));
+    for (const tag of toRemove) {
+      try {
+        await execFileAsync("docker", ["rmi", "-f", tag]);
+      } catch {
+        // ignore: image in use, already gone, etc.
+      }
+    }
+  } catch {
+    // ignore: docker images listing failed (daemon down, no perms, etc.)
+  }
+}
 
 async function waitForPostgres(connStr: string, attempts = 30): Promise<void> {
   let lastErr: unknown = null;
@@ -96,6 +129,8 @@ afterAll(async () => {
       // ignore
     }
   }
+  // Remove any images this run's project produced, best-effort.
+  await cleanupImages(imagePrefix);
 }, 120000);
 
 async function signup(
@@ -124,6 +159,7 @@ describe("cloud-host cross-tenant project isolation (real Docker + Postgres)", (
       // the body — the server must IGNORE that and bind ownership to the
       // creating token (A), or the per-project authz below is meaningless.
       const slug = `xt-${suffix}`;
+      imagePrefix = "podkit-" + slug + ":v";
       const createRes = await fetch(apiUrl + "/v1/projects", {
         method: "POST",
         headers: {

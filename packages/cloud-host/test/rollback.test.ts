@@ -47,6 +47,34 @@ async function waitForPostgres(connStr: string, attempts = 60): Promise<void> {
   );
 }
 
+// Best-effort, non-fatal cleanup of Docker images this suite built. Deploys
+// tag images `podkit-<slug>:v<hex>` (see host.ts); we list and remove only the
+// images matching this suite's repository prefix. Failures are swallowed so
+// cleanup never fails the suite.
+async function cleanupImages(repositoryPrefix: string): Promise<void> {
+  try {
+    const { stdout } = await execFileAsync("docker", [
+      "images",
+      "--format",
+      "{{.Repository}}:{{.Tag}}",
+    ]);
+    const toRemove = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((img) => img.startsWith(repositoryPrefix));
+    for (const tag of toRemove) {
+      try {
+        await execFileAsync("docker", ["rmi", "-f", tag]);
+      } catch {
+        // ignore: image in use, already gone, etc.
+      }
+    }
+  } catch {
+    // ignore: docker images listing failed (daemon down, no perms, etc.)
+  }
+}
+
 // Build a fixture app context dir whose HTTP server returns `marker`.
 function makeFixture(marker: string): string {
   const dir = mkdtempSync(join(tmpdir(), "podkit-rb-"));
@@ -174,6 +202,8 @@ afterAll(async () => {
       // ignore
     }
   }
+  // Remove images this suite built (slug rb), best-effort.
+  await cleanupImages("podkit-rb:v");
   const { stdout } = await execFileAsync("docker", [
     "ps",
     "-a",
