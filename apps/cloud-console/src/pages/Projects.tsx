@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, getConfig } from "../api/client.ts";
+import { api, getToken } from "../api/client.ts";
 import type { Project } from "../api/client.ts";
 import { useApi } from "../lib/useApi.ts";
 
@@ -82,7 +82,7 @@ function CreateProject({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ connectionString?: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const hasKey = getConfig().key !== "";
+  const hasKey = getToken() !== "";
 
   async function create() {
     setBusy(true); setErr(null);
@@ -114,7 +114,7 @@ function CreateProject({ onDone }: { onDone: () => void }) {
     <div className="panel rise">
       <div className="panel-head"><h3>New project</h3></div>
       <div className="panel-body stack">
-        {!hasKey && <span className="status status-building"><span className="dot" />set an API key in Connect to create projects</span>}
+        {!hasKey && <span className="status status-building"><span className="dot" />sign in to create projects</span>}
         <div className="grid-2">
           <div className="field"><label>Slug</label><input className="input mono" placeholder="my-app" value={slug} onChange={(e) => setSlug(e.target.value)} /></div>
           <div className="field"><label>Owner</label><input className="input" placeholder="me" value={owner} onChange={(e) => setOwner(e.target.value)} /></div>

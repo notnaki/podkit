@@ -149,6 +149,9 @@ importers:
 
   packages/cloud-host:
     dependencies:
+      '@podkit/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@podkit/cloud':
         specifier: workspace:*
         version: link:../cloud

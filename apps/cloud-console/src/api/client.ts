@@ -1,30 +1,40 @@
-// Client for the podkit control-plane (@podkit/cloud-host). Base URL + API key
-// are persisted locally; mutating calls send x-podkit-key.
+// Client for the podkit control-plane (@podkit/cloud-host). Base URL + session
+// token are persisted locally; authenticated calls send Authorization: Bearer.
 
 export type Envelope<T> =
   | { ok: true; data: T }
   | { ok: false; error: { code: string; message: string; hint?: string } };
 
 const URL_KEY = "podkit.cloud.apiUrl";
-const KEY_KEY = "podkit.cloud.apiKey";
+const TOKEN_KEY = "podkit.cloud.token";
 
-export function getConfig(): { url: string; key: string } {
-  return {
-    url: localStorage.getItem(URL_KEY) ?? "http://localhost:8080",
-    key: localStorage.getItem(KEY_KEY) ?? "",
-  };
+export function getApiUrl(): string {
+  return localStorage.getItem(URL_KEY) ?? "http://localhost:8080";
 }
-export function setConfig(url: string, key: string): void {
+export function setApiUrl(url: string): void {
   localStorage.setItem(URL_KEY, url);
-  localStorage.setItem(KEY_KEY, key);
+}
+
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) ?? "";
+}
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<Envelope<T>> {
-  const { url, key } = getConfig();
+  const url = getApiUrl();
+  const token = getToken();
   try {
     const res = await fetch(url.replace(/\/$/, "") + path, {
       method,
-      headers: { "content-type": "application/json", ...(key ? { "x-podkit-key": key } : {}) },
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return (await res.json()) as Envelope<T>;
@@ -38,6 +48,15 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<En
       },
     };
   }
+}
+
+export interface Account {
+  id: string;
+  email: string;
+}
+export interface AuthResult {
+  token: string;
+  account: Account;
 }
 
 export interface Project {
@@ -55,6 +74,13 @@ export interface CreatedProject { project: Project; database?: string; connectio
 
 export const api = {
   health: () => call<{ status: string }>("GET", "/v1/health"),
+  signup: (email: string, password: string) =>
+    call<AuthResult>("POST", "/v1/auth/signup", { email, password }),
+  login: (email: string, password: string) =>
+    call<AuthResult>("POST", "/v1/auth/login", { email, password }),
+  me: () => call<{ account: Account }>("GET", "/v1/auth/me"),
+  cliApprove: (userCode: string) =>
+    call<unknown>("POST", "/v1/auth/cli/approve", { userCode }),
   listProjects: () => call<{ projects: Project[] }>("GET", "/v1/projects"),
   createProject: (slug: string, owner: string) =>
     call<CreatedProject>("POST", "/v1/projects", { slug, owner }),

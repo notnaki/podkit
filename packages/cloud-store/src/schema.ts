@@ -16,3 +16,21 @@ export const deployments = pgTable("deployments", {
   status: text("status"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+export const accounts = pgTable("accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").unique().notNull(),
+  passwordHash: text("password_hash"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const cliSessions = pgTable("cli_auth_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  deviceCode: text("device_code").unique().notNull(),
+  userCode: text("user_code").notNull(),
+  status: text("status").notNull(),
+  accountId: uuid("account_id"),
+  token: text("token"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at").defaultNow(),
+});
