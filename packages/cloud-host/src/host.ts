@@ -4,11 +4,15 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { createStore } from "@podkit/cloud-store";
 import {
   buildImage,
   runContainer,
   stopContainer,
+  isPodkitApp,
+  buildPodkitApp,
 } from "@podkit/runtime";
 import { createGateway } from "@podkit/gateway";
 import { provisionDatabase } from "@podkit/db-provision";
@@ -178,6 +182,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       const b = (body ?? {}) as {
         contextDir?: string;
         containerPort?: number;
+        appSubpath?: string;
       };
       if (!b.contextDir || typeof b.containerPort !== "number") {
         return {
@@ -201,7 +206,28 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       const tag = "podkit-" + slug + ":" + version;
       const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
 
-      await buildImage({ contextDir: b.contextDir, tag });
+      // Build the image: an explicit Dockerfile wins; otherwise, if it's a
+      // podkit app (has app/routes), the buildpack generates one — zero-config.
+      const appDir = b.appSubpath ? join(b.contextDir, b.appSubpath) : b.contextDir;
+      if (existsSync(join(appDir, "Dockerfile"))) {
+        await buildImage({ contextDir: appDir, tag });
+      } else if (isPodkitApp(appDir)) {
+        await buildPodkitApp({
+          repoRoot: b.contextDir,
+          appSubpath: b.appSubpath ?? ".",
+          tag,
+          port: b.containerPort,
+        });
+      } else {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "no Dockerfile and not a podkit app",
+            "add a Dockerfile, or deploy a podkit app (with app/routes)",
+          ),
+        };
+      }
       const { id, hostPort } = await runContainer({
         image: tag,
         name,
