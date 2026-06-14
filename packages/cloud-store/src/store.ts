@@ -31,6 +31,9 @@ export type Store = {
     status: string;
     containerPort: number;
     kind: string;
+    // Optional FK to project_branches.id when this deployment is a branch
+    // preview. Null/undefined for production deployments (deploy/rollback).
+    branchId?: string | null;
   }) => Promise<{ id: string }>;
   listDeployments: (
     projectId: string,
@@ -43,6 +46,7 @@ export type Store = {
       containerPort: number;
       containerId: string;
       kind: string;
+      branchId: string | null;
       createdAt: string | null;
     }>
   >;
@@ -53,6 +57,7 @@ export type Store = {
     containerPort: number;
     containerId: string;
     status: string;
+    branchId: string | null;
   } | null>;
   setEnv: (opts: {
     projectId: string;
@@ -173,6 +178,17 @@ export function createStore(opts: CreateStoreOptions): Store {
     await pool.query(
       `ALTER TABLE deployments ADD COLUMN IF NOT EXISTS kind text DEFAULT 'deploy'`,
     );
+    // Branch-preview deployments carry a FK to the branch they were built
+    // against (production deployments leave it null). ON DELETE SET NULL so
+    // dropping a branch never orphans/blocks its historical deployment rows.
+    await pool.query(
+      `ALTER TABLE deployments ADD COLUMN IF NOT EXISTS branch_id uuid`,
+    );
+    // Index for filtering a project's deployments by branch (preview listing).
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_deployments_project_branch
+       ON deployments(project_id, branch_id)`,
+    );
     await pool.query(`
       CREATE TABLE IF NOT EXISTS project_env (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -244,6 +260,26 @@ export function createStore(opts: CreateStoreOptions): Store {
         FOREIGN KEY(project_id) REFERENCES projects(id)
       )
     `);
+    // Wire the deployments.branch_id FK now that project_branches exists. The
+    // constraint is added idempotently (catch duplicate_object 42710) and uses
+    // ON DELETE SET NULL so dropping a branch preserves its deployment history.
+    try {
+      await pool.query(
+        `ALTER TABLE deployments
+           ADD CONSTRAINT deployments_branch_id_fkey
+           FOREIGN KEY (branch_id) REFERENCES project_branches(id)
+           ON DELETE SET NULL`,
+      );
+    } catch (err) {
+      // 42710 duplicate_object: the constraint already exists -> no-op.
+      if (
+        typeof err !== "object" ||
+        err === null ||
+        (err as { code?: string }).code !== "42710"
+      ) {
+        throw err;
+      }
+    }
   }
 
   async function createProject(input: {
@@ -322,11 +358,12 @@ export function createStore(opts: CreateStoreOptions): Store {
     status: string;
     containerPort: number;
     kind: string;
+    branchId?: string | null;
   }): Promise<{ id: string }> {
     const result = await pool.query<{ id: string }>(
       `INSERT INTO deployments
-         (project_id, version, container_id, host_port, container_port, kind, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+         (project_id, version, container_id, host_port, container_port, kind, status, branch_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
       [
         input.projectId,
         input.version,
@@ -335,6 +372,7 @@ export function createStore(opts: CreateStoreOptions): Store {
         input.containerPort,
         input.kind,
         input.status,
+        input.branchId ?? null,
       ],
     );
     return { id: result.rows[0].id };
@@ -351,6 +389,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       containerPort: number;
       containerId: string;
       kind: string;
+      branchId: string | null;
       createdAt: string | null;
     }>
   > {
@@ -362,9 +401,10 @@ export function createStore(opts: CreateStoreOptions): Store {
       container_port: number | null;
       container_id: string | null;
       kind: string | null;
+      branch_id: string | null;
       created_at: Date | null;
     }>(
-      `SELECT id, version, host_port, status, container_port, container_id, kind, created_at
+      `SELECT id, version, host_port, status, container_port, container_id, kind, branch_id, created_at
        FROM deployments
        WHERE project_id = $1 ORDER BY created_at ASC`,
       [projectId],
@@ -377,6 +417,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       containerPort: r.container_port ?? 0,
       containerId: r.container_id ?? "",
       kind: r.kind ?? "deploy",
+      branchId: r.branch_id ?? null,
       createdAt: r.created_at ? r.created_at.toISOString() : null,
     }));
   }
@@ -388,6 +429,7 @@ export function createStore(opts: CreateStoreOptions): Store {
     containerPort: number;
     containerId: string;
     status: string;
+    branchId: string | null;
   } | null> {
     let result;
     try {
@@ -398,8 +440,9 @@ export function createStore(opts: CreateStoreOptions): Store {
         container_port: number | null;
         container_id: string | null;
         status: string | null;
+        branch_id: string | null;
       }>(
-        `SELECT id, project_id, version, container_port, container_id, status
+        `SELECT id, project_id, version, container_port, container_id, status, branch_id
          FROM deployments WHERE id = $1 LIMIT 1`,
         [id],
       );
@@ -416,6 +459,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       containerPort: row.container_port ?? 0,
       containerId: row.container_id ?? "",
       status: row.status ?? "",
+      branchId: row.branch_id ?? null,
     };
   }
 

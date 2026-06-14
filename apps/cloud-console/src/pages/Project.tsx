@@ -241,7 +241,185 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
         </div>
         <div className="panel-foot">Rolling back re-runs a previous build and instantly reroutes the URL to it.</div>
       </section>
+      <Previews slug={slug} url={url} />
     </div>
+  );
+}
+
+// Derive the gateway base (scheme://host[:port]) from a production project URL of
+// the shape `<gateway>/_p/<slug>/`, so we can reconstruct a preview URL
+// (`<gateway>/_p/<slug>--<branch>/`) for rows that only carry a branchId. Returns
+// null when no production URL is available yet (project never deployed).
+function gatewayBaseFrom(url: string | null): string | null {
+  if (!url) return null;
+  const idx = url.indexOf("/_p/");
+  return idx === -1 ? null : url.slice(0, idx);
+}
+
+function previewUrlFor(base: string | null, slug: string, branchName: string): string | null {
+  if (!base) return null;
+  return base + "/_p/" + slug + "--" + branchName + "/";
+}
+
+// Branch previews: deploy a branch as an isolated container routed under
+// <slug>--<branch>, list active/stopped previews, and tear them down. Signed-in
+// only; the control plane re-validates ownership + branch existence and injects
+// the branch's scoped DB connection string server-side.
+function Previews({ slug, url }: { slug: string; url: string | null }) {
+  const branches = useApi(() => api.listBranches(slug), [slug]);
+  const previews = useApi(() => api.listPreviewDeployments(slug), [slug]);
+  const [branchName, setBranchName] = useState("");
+  const [ctx, setCtx] = useState("");
+  const [port, setPort] = useState("3000");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // The full preview URL returned by the most recent successful deploy.
+  const [lastUrl, setLastUrl] = useState<{ branchName: string; url: string } | null>(null);
+  const [pending, setPending] = useState<{ branchName: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const hasKey = getToken() !== "";
+
+  const branchList = branches.data?.branches ?? [];
+  const list = previews.data?.deployments ?? [];
+  // Map branchId -> name so the previews table (which carries only branchId) can
+  // render branch names and reconstruct per-row preview URLs.
+  const nameById = new Map<string, string>();
+  for (const b of branchList) nameById.set(b.id, b.name);
+  const gatewayBase = gatewayBaseFrom(url);
+  const portNum = parseInt(port, 10);
+  const portValid = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
+
+  async function deploy() {
+    if (!branchName || !ctx.trim() || !portValid) return;
+    setBusy(true); setNote(null); setLastUrl(null);
+    const res = await api.deployPreview(slug, branchName, ctx.trim(), portNum);
+    setBusy(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `deployed ${res.data.branchName} ${res.data.version}` });
+      setLastUrl({ branchName: res.data.branchName, url: res.data.url });
+      previews.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+    }
+  }
+
+  async function confirmDelete() {
+    if (!pending) return;
+    setDeleting(true); setNote(null);
+    const res = await api.deletePreview(slug, pending.branchName);
+    setDeleting(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `stopped ${pending.branchName}` });
+      if (lastUrl && lastUrl.branchName === pending.branchName) setLastUrl(null);
+      setPending(null);
+      previews.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+      setPending(null);
+    }
+  }
+
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-head"><h3>Deploy preview</h3></div>
+        <div className="panel-body stack">
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to deploy previews</span>}
+          <div className="field">
+            <label>Branch</label>
+            <select
+              className="input mono"
+              value={branchName}
+              onChange={(e) => setBranchName(e.target.value)}
+              disabled={!hasKey || branches.loading}
+            >
+              <option value="">{branches.loading ? "Loading branches…" : branchList.length === 0 ? "No branches — create one in Database" : "Select a branch…"}</option>
+              {branchList.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+            </select>
+          </div>
+          <div className="field"><label>Build context (path to the app)</label><input className="input mono" placeholder="/abs/path/to/app" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
+          <div className="field"><label>Container port</label><input className="input mono" type="number" min={1} max={65535} placeholder="3000" value={port} onChange={(e) => setPort(e.target.value)} style={{ width: 120 }} /></div>
+          {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
+          {lastUrl && (
+            <div className="field">
+              <label>Preview URL for <span className="mono">{lastUrl.branchName}</span></label>
+              <div className="row" style={{ gap: "var(--space-sm)", alignItems: "center", flexWrap: "wrap" }}>
+                <a className="mono" style={{ color: "var(--link)" }} href={lastUrl.url} target="_blank" rel="noreferrer">{lastUrl.url} ↗</a>
+                <CopyButton value={lastUrl.url} label="Copy" />
+              </div>
+            </div>
+          )}
+          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !branchName || !ctx.trim() || !portValid} onClick={deploy}>{busy ? "Building…" : "Deploy preview"}</button></div>
+        </div>
+        <div className="panel-foot">Each preview runs an isolated container routed under <span className="mono">{slug}--&lt;branch&gt;</span> with the branch&apos;s scoped database injected.</div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h3>Previews</h3>
+          {list.length > 0 && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{list.length} preview{list.length === 1 ? "" : "s"}</span>}
+        </div>
+        <div className="panel-body flush" style={{ padding: 0 }}>
+          {previews.loading ? (
+            <div className="state">Loading…</div>
+          ) : previews.error ? (
+            <div className="state"><strong>{previews.error.code}</strong><span>{previews.error.message}</span></div>
+          ) : list.length === 0 ? (
+            <div className="state"><strong>No previews</strong><span>Deploy a branch above to spin up an isolated preview.</span></div>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Branch</th><th>Status</th><th>Created</th><th style={{ width: 1 }} /></tr></thead>
+              <tbody>
+                {list.map((d) => {
+                  const bName = d.branchId ? nameById.get(d.branchId) ?? null : null;
+                  const pUrl = bName ? previewUrlFor(gatewayBase, slug, bName) : null;
+                  return (
+                    <tr key={d.id}>
+                      <td className="mono">
+                        {bName
+                          ? (pUrl ? <a style={{ color: "var(--link)" }} href={pUrl} target="_blank" rel="noreferrer">{bName} ↗</a> : bName)
+                          : <span className="faint">{d.branchId ? "unknown branch" : "—"}</span>}
+                      </td>
+                      <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "—")}</span></td>
+                      <td className="faint mono" style={{ fontSize: "var(--t-sm)" }}>{fmtTime(d.createdAt)}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <div className="row" style={{ gap: "var(--space-sm)", justifyContent: "flex-end" }}>
+                          {pUrl && <CopyButton value={pUrl} label="Copy preview URL" />}
+                          {bName && <button className="btn btn-ghost" disabled={!hasKey || deleting} onClick={() => setPending({ branchName: bName })}>Delete</button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div className="panel-foot">Deleting a preview stops its container and clears its route. Production is unaffected.</div>
+      </section>
+
+      {pending && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => { if (!deleting) setPending(null); }}
+          style={{ position: "fixed", inset: 0, background: "color-mix(in oklch, var(--bg) 70%, transparent)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "var(--space-lg)", zIndex: 50 }}
+        >
+          <div className="panel" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480, width: "100%" }}>
+            <div className="panel-head"><h3>Delete preview</h3></div>
+            <div className="panel-body stack">
+              <p className="muted" style={{ margin: 0, maxWidth: "52ch" }}>
+                Tear down the preview for branch <span className="mono" style={{ color: "var(--text)" }}>{pending.branchName}</span>? This stops its container and clears its route. The branch and its database are not affected.
+              </p>
+              <div className="row" style={{ justifyContent: "flex-end", gap: "var(--space-sm)" }}>
+                <button className="btn btn-ghost" disabled={deleting} onClick={() => setPending(null)}>Cancel</button>
+                <button className="btn btn-danger" disabled={!hasKey || deleting} onClick={confirmDelete}>{deleting ? "Deleting…" : "Delete preview"}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

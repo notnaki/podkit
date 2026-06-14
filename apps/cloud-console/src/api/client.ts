@@ -77,8 +77,16 @@ export interface DeploymentHistoryItem {
   version: string;
   status: string | null;
   kind: string | null;
+  // Present only for preview deployments (FK to the branch); null for prod.
+  branchId?: string | null;
   createdAt: string | null;
   active: boolean;
+}
+export interface PreviewDeployResult {
+  version: string;
+  hostPort: number;
+  branchName: string;
+  url: string;
 }
 export interface ProjectDetail { project: Project; latest: Deployment | null; url: string | null }
 export interface CreatedProject { project: Project; database?: string; connectionString?: string }
@@ -187,5 +195,37 @@ export const api = {
     call<{ deleted: string }>(
       "DELETE",
       `/v1/projects/${encodeURIComponent(slug)}/branches/${encodeURIComponent(name)}`,
+    ),
+  // Deploy a branch as an isolated preview (routes under <slug>--<branch>).
+  deployPreview: (
+    slug: string,
+    branchName: string,
+    contextDir: string,
+    containerPort: number,
+  ) =>
+    call<PreviewDeployResult>(
+      "POST",
+      `/v1/projects/${encodeURIComponent(slug)}/deploy-branch`,
+      { branchName, contextDir, containerPort },
+    ),
+  // List a project's deployments, filtered to preview-kind rows only.
+  listPreviewDeployments: async (slug: string) => {
+    const res = await call<{ deployments: DeploymentHistoryItem[] }>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/deployments`,
+    );
+    if (!res.ok) return res;
+    return {
+      ok: true as const,
+      data: {
+        deployments: res.data.deployments.filter((d) => d.kind === "preview"),
+      },
+    };
+  },
+  // Tear down an active branch preview (stops its container, clears the route).
+  deletePreview: (slug: string, branchName: string) =>
+    call<{ stopped: string }>(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}/preview/${encodeURIComponent(branchName)}`,
     ),
 };
