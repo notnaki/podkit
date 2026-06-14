@@ -34,6 +34,15 @@ export function roleNameForDatabase(database: string): string {
   return `${database}_app`;
 }
 
+/** True when a pg error carries a specific SQLSTATE code. */
+function isPgCode(err: unknown, code: string): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === code
+  );
+}
+
 /**
  * Swap the database path of a Postgres connection string, preserving creds,
  * host, port, and query params. Used to point admin creds at a new database.
@@ -87,27 +96,23 @@ export async function provisionDatabase(opts: {
   const admin = new Client({ connectionString: opts.adminConnectionString });
   await admin.connect();
   try {
-    // 1. Create the database (idempotent; CREATE DATABASE cannot run in a txn
-    //    and has no IF NOT EXISTS, so check pg_database first).
-    const existing = await admin.query(
-      "SELECT 1 FROM pg_database WHERE datname = $1",
-      [database],
-    );
-    if (existing.rowCount === 0) {
-      // Identifiers are validated to [a-z0-9_], so quoting is safe; parameters
-      // are not allowed in CREATE DATABASE / CREATE ROLE.
+    // 1. Create the database. CREATE DATABASE has no IF NOT EXISTS, so tolerate
+    //    duplicate_database (42P04) to stay idempotent and race-safe — no
+    //    check-then-create TOCTOU. Identifiers are validated to [a-z0-9_], so
+    //    quoting is safe; parameters are not allowed in CREATE DATABASE/ROLE.
+    try {
       await admin.query(`CREATE DATABASE "${database}"`);
+    } catch (err) {
+      if (!isPgCode(err, "42P04")) throw err;
     }
 
     // 2. Create (or rotate the password of) the per-project login role. A bare
     //    CREATE ROLE is non-superuser, non-createdb, non-createrole by default.
-    const roleExists = await admin.query(
-      "SELECT 1 FROM pg_roles WHERE rolname = $1",
-      [role],
-    );
-    if (roleExists.rowCount === 0) {
+    //    If it already exists (duplicate_object 42710), rotate the password.
+    try {
       await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);
-    } else {
+    } catch (err) {
+      if (!isPgCode(err, "42710")) throw err;
       await admin.query(`ALTER ROLE "${role}" WITH LOGIN PASSWORD '${password}'`);
     }
 
