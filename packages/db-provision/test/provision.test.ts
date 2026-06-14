@@ -122,4 +122,74 @@ describe("provisionDatabase", () => {
     },
     60_000,
   );
+
+  it(
+    "hands out a scoped, non-superuser role — not admin creds",
+    async () => {
+      const result = await provisionDatabase({
+        adminConnectionString,
+        slug: "scoped",
+      });
+      expect(result.role).toBe("proj_scoped_app");
+
+      // The returned creds must NOT be the admin/superuser.
+      const url = new URL(result.connectionString);
+      expect(url.username).toBe("proj_scoped_app");
+      expect(url.username).not.toBe("postgres");
+
+      // The role must lack superuser / createdb / createrole.
+      const admin = new Client({ connectionString: adminConnectionString });
+      await admin.connect();
+      try {
+        const r = await admin.query(
+          "SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = $1",
+          [result.role],
+        );
+        expect(r.rows[0]).toMatchObject({
+          rolsuper: false,
+          rolcreatedb: false,
+          rolcreaterole: false,
+        });
+      } finally {
+        await admin.end();
+      }
+
+      // The role can fully operate inside its own database (owns public).
+      const own = new Client({ connectionString: result.connectionString });
+      await own.connect();
+      try {
+        await own.query("CREATE TABLE items (id int primary key, name text)");
+        await own.query("INSERT INTO items VALUES (1, 'a')");
+        const sel = await own.query("SELECT name FROM items WHERE id = 1");
+        expect(sel.rows[0].name).toBe("a");
+      } finally {
+        await own.end();
+      }
+    },
+    60_000,
+  );
+
+  it(
+    "a project role cannot connect to another project's database",
+    async () => {
+      const a = await provisionDatabase({ adminConnectionString, slug: "tenant-a" });
+      const b = await provisionDatabase({ adminConnectionString, slug: "tenant-b" });
+
+      // Take tenant A's credentials but point them at tenant B's database.
+      const crossUrl = new URL(a.connectionString);
+      crossUrl.pathname = `/${b.database}`;
+
+      const intruder = new Client({ connectionString: crossUrl.toString() });
+      let failed = false;
+      try {
+        await intruder.connect();
+        await intruder.end();
+      } catch {
+        failed = true;
+        await intruder.end().catch(() => {});
+      }
+      expect(failed).toBe(true);
+    },
+    60_000,
+  );
 });

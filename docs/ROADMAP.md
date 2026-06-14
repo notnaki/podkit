@@ -48,11 +48,11 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Custom domains** (PR #17): project_domains, gateway resolves by Host header (domain→slug→container), console Domains tab + `podkit cloud domains add|list|rm`.
 - **Deployment history + rollback** (PR #18): deployments persist `container_port`+`kind`; `GET /v1/projects/:slug/deployments` (newest-first, active flag) + `POST /v1/projects/:slug/rollback {deploymentId}` re-runs a prior version's immutable image as a new deployment and reroutes instantly. Console Deployments tab is a full history table with per-row Rollback/Current; `podkit cloud deployments|rollback`.
 - **Runtime logs** (PR #19): `GET /v1/projects/:slug/logs[?deploymentId=]` returns a deployment's container logs (`docker logs` of the active deployment by default). **Auth-required** (logs can contain secrets) — unlike the other open read endpoints. Console **Logs** tab (terminal-style, refresh) + `podkit cloud logs <slug>`.
+- **Per-project scoped DB roles** (PR #20): `provisionDatabase` now mints a **non-superuser per-project login role** (`<db>_app`) that owns only its own database + `public` schema; PUBLIC `CONNECT` is revoked so a tenant's creds can't reach any other tenant's DB. The returned connectionString carries the scoped role creds (no more admin/superuser handed to tenants); re-provision rotates the password; `dropDatabase` can drop the role too. **Note:** projects provisioned before this still have admin creds in any DATABASE_URL they stored — re-provision/rotate to fix.
 
 ## 📋 To do — cloud hardening (toward production)
 
-1. **Per-project DB scoped roles** — currently reuses admin creds (MVP); add per-tenant role + least-privilege.
-2. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
+1. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
 3. **Secrets-at-rest encryption** — env values marked sensitive are stored plaintext in control-plane Postgres; encrypt at rest.
 4. **Domain ownership verification + TLS** — DNS TXT challenge to prove domain ownership, then automatic cert issuance (ACME) for custom domains.
 5. **Standalone buildpack** — buildpack assumes the monorepo; support deploying podkit apps that depend on published packages.
