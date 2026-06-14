@@ -46,16 +46,17 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Console served from the cloud** (PR #15): control-plane serves the built cloud-console as a same-origin SPA on :8080 (API under /v1, gateway :8090). Vite dev proxy keeps standalone dev (:5190) working.
 - **Env vars** (PR #16): project_env (sensitive/plain), `POST/GET/DELETE /v1/projects/:slug/env` (masked on read), injected into the container at deploy, console Environment tab + `podkit cloud env set|list|rm`.
 - **Custom domains** (PR #17): project_domains, gateway resolves by Host header (domain→slug→container), console Domains tab + `podkit cloud domains add|list|rm`.
+- **Deployment history + rollback** (PR #18): deployments persist `container_port`+`kind`; `GET /v1/projects/:slug/deployments` (newest-first, active flag) + `POST /v1/projects/:slug/rollback {deploymentId}` re-runs a prior version's immutable image as a new deployment and reroutes instantly. Console Deployments tab is a full history table with per-row Rollback/Current; `podkit cloud deployments|rollback`.
 
 ## 📋 To do — cloud hardening (toward production)
 
 1. **Per-project DB scoped roles** — currently reuses admin creds (MVP); add per-tenant role + least-privilege.
-2. **Deployments history + rollback in the console** — `store.listDeployments` records every deploy; surface the full history + one-click rollback (only the latest is shown today).
-3. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
-4. **Secrets-at-rest encryption** — env values marked sensitive are stored plaintext in control-plane Postgres; encrypt at rest.
-5. **Domain ownership verification + TLS** — DNS TXT challenge to prove domain ownership, then automatic cert issuance (ACME) for custom domains.
-6. **Standalone buildpack** — buildpack assumes the monorepo; support deploying podkit apps that depend on published packages.
-7. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
+2. **Token `exp`/revocation + approve rate-limiting** — user Bearer tokens are currently non-expiring; add expiry/revocation and rate-limit CLI approve.
+3. **Secrets-at-rest encryption** — env values marked sensitive are stored plaintext in control-plane Postgres; encrypt at rest.
+4. **Domain ownership verification + TLS** — DNS TXT challenge to prove domain ownership, then automatic cert issuance (ACME) for custom domains.
+5. **Standalone buildpack** — buildpack assumes the monorepo; support deploying podkit apps that depend on published packages.
+6. **Prod app bundling** — containers currently run the dev server; add an optimized production build/runtime, cold-start, edge.
+7. **Stop superseded containers on deploy/rollback** — a new deploy/rollback leaves the prior container running (only torn down on shutdown); reap superseded containers to reclaim resources.
 8. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
