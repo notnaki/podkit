@@ -106,6 +106,8 @@ describe("cloud-store", () => {
         containerId: "abc123",
         hostPort: 8080,
         status: "running",
+        containerPort: 3000,
+        kind: "deploy",
       });
       expect(dep.id).toBeTruthy();
 
@@ -115,6 +117,74 @@ describe("cloud-store", () => {
       expect(deployments[0].version).toBe("1.0.0");
       expect(deployments[0].hostPort).toBe(8080);
       expect(deployments[0].status).toBe("running");
+      expect(deployments[0].containerPort).toBe(3000);
+      expect(deployments[0].kind).toBe("deploy");
+      expect(deployments[0].createdAt).toBeTruthy();
+    },
+    60000,
+  );
+
+  it(
+    "records a rollback as a newer deployment and resolves deployments by id",
+    async () => {
+      const slug = `roll-${randomBytes(3).toString("hex")}`;
+      const project = await store.createProject({ slug, owner: "me" });
+
+      const first = await store.recordDeployment({
+        projectId: project.id,
+        version: "v1",
+        containerId: "c-v1",
+        hostPort: 5001,
+        status: "running",
+        containerPort: 3000,
+        kind: "deploy",
+      });
+      // Ensure created_at ordering is strictly increasing across rows.
+      await new Promise((r) => setTimeout(r, 10));
+      const second = await store.recordDeployment({
+        projectId: project.id,
+        version: "v2",
+        containerId: "c-v2",
+        hostPort: 5002,
+        status: "running",
+        containerPort: 3000,
+        kind: "deploy",
+      });
+
+      // Oldest-first ordering: the last element is the active deployment.
+      const list = await store.listDeployments(project.id);
+      expect(list.map((d) => d.version)).toEqual(["v1", "v2"]);
+      expect(list[list.length - 1].id).toBe(second.id);
+
+      // Resolve the first deployment by id (the rollback target).
+      const target = await store.getDeploymentById(first.id);
+      expect(target).not.toBeNull();
+      expect(target!.projectId).toBe(project.id);
+      expect(target!.version).toBe("v1");
+      expect(target!.containerPort).toBe(3000);
+
+      // A rollback re-runs v1 as a new (newest) deployment.
+      await new Promise((r) => setTimeout(r, 10));
+      await store.recordDeployment({
+        projectId: project.id,
+        version: "v1",
+        containerId: "c-v1-again",
+        hostPort: 5003,
+        status: "running",
+        containerPort: 3000,
+        kind: "rollback",
+      });
+      const after = await store.listDeployments(project.id);
+      expect(after.length).toBe(3);
+      const newest = after[after.length - 1];
+      expect(newest.version).toBe("v1");
+      expect(newest.kind).toBe("rollback");
+
+      // Unknown / malformed ids resolve to null rather than throwing.
+      expect(await store.getDeploymentById("not-a-uuid")).toBeNull();
+      expect(
+        await store.getDeploymentById("00000000-0000-0000-0000-000000000999"),
+      ).toBeNull();
     },
     60000,
   );

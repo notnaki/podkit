@@ -294,6 +294,8 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         containerId: id,
         hostPort,
         status: "running",
+        containerPort: b.containerPort,
+        kind: "deploy",
       });
       routeMap.set(slug, hostPort);
 
@@ -481,6 +483,132 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }),
     };
   });
+
+  router.register("GET", "/v1/projects/:slug/deployments", async ({ params }) => {
+    const slug = params.slug!;
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return {
+        status: 404,
+        body: fail("E_NOT_FOUND", "unknown project: " + slug),
+      };
+    }
+    // store returns oldest-first; the most recent is the live/active one.
+    const deployments = await store.listDeployments(project.id);
+    const activeId =
+      deployments.length > 0 ? deployments[deployments.length - 1]!.id : null;
+    // Present newest-first and flag which one is currently serving traffic.
+    const items = deployments
+      .slice()
+      .reverse()
+      .map((d) => ({
+        id: d.id,
+        version: d.version,
+        status: d.status,
+        kind: d.kind,
+        createdAt: d.createdAt,
+        active: d.id === activeId,
+      }));
+    return { status: 200, body: ok({ deployments: items }) };
+  });
+
+  router.register(
+    "POST",
+    "/v1/projects/:slug/rollback",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const b = (body ?? {}) as { deploymentId?: string };
+      if (!b.deploymentId || typeof b.deploymentId !== "string") {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "deploymentId required",
+            "POST /v1/projects/:slug/rollback {deploymentId}",
+          ),
+        };
+      }
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const target = await store.getDeploymentById(b.deploymentId);
+      if (!target || target.projectId !== project.id) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown deployment for this project"),
+        };
+      }
+      if (!target.containerPort) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "deployment predates rollback support (no container port recorded)",
+            "redeploy this project, then rollbacks will be available",
+          ),
+        };
+      }
+
+      // Re-run the immutable, version-tagged image for the target deployment.
+      // Images are tagged podkit-<slug>:<version> at build time and persist, so
+      // rolling back means starting a fresh container from that same image.
+      const tag = "podkit-" + slug + ":" + target.version;
+      const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
+      const envRows = await store.listEnv(project.id);
+      const env: Record<string, string> = {};
+      for (const row of envRows) {
+        env[row.key] = row.value;
+      }
+
+      let started: { id: string; hostPort: number };
+      try {
+        started = await runContainer({
+          image: tag,
+          name,
+          containerPort: target.containerPort,
+          env,
+        });
+      } catch {
+        return {
+          status: 500,
+          body: fail(
+            "E_DEPLOY_FAILED",
+            "could not start the image for that deployment",
+            "the image for version " + target.version + " may have been pruned",
+          ),
+        };
+      }
+      runningContainers.push(name);
+
+      // A rollback is recorded as a new deployment (append-only history) that
+      // re-uses the target's version; being newest, it becomes the active one.
+      await store.recordDeployment({
+        projectId: project.id,
+        version: target.version,
+        containerId: started.id,
+        hostPort: started.hostPort,
+        status: "running",
+        containerPort: target.containerPort,
+        kind: "rollback",
+      });
+      routeMap.set(slug, started.hostPort);
+
+      return {
+        status: 200,
+        body: ok({
+          version: target.version,
+          hostPort: started.hostPort,
+          url: gatewayUrl + "/_p/" + slug + "/",
+          rolledBackTo: b.deploymentId,
+        }),
+      };
+    },
+  );
 
   router.register(
     "POST",

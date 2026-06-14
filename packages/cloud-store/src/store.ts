@@ -22,12 +22,29 @@ export type Store = {
     containerId: string;
     hostPort: number;
     status: string;
+    containerPort: number;
+    kind: string;
   }) => Promise<{ id: string }>;
   listDeployments: (
     projectId: string,
   ) => Promise<
-    Array<{ id: string; version: string; hostPort: number; status: string }>
+    Array<{
+      id: string;
+      version: string;
+      hostPort: number;
+      status: string;
+      containerPort: number;
+      kind: string;
+      createdAt: string | null;
+    }>
   >;
+  getDeploymentById: (id: string) => Promise<{
+    id: string;
+    projectId: string;
+    version: string;
+    containerPort: number;
+    status: string;
+  } | null>;
   setEnv: (opts: {
     projectId: string;
     key: string;
@@ -98,10 +115,19 @@ export function createStore(opts: CreateStoreOptions): Store {
         version text,
         container_id text,
         host_port integer,
+        container_port integer,
+        kind text DEFAULT 'deploy',
         status text,
         created_at timestamp DEFAULT now()
       )
     `);
+    // Idempotent backfill for control-planes provisioned before rollback support.
+    await pool.query(
+      `ALTER TABLE deployments ADD COLUMN IF NOT EXISTS container_port integer`,
+    );
+    await pool.query(
+      `ALTER TABLE deployments ADD COLUMN IF NOT EXISTS kind text DEFAULT 'deploy'`,
+    );
     await pool.query(`
       CREATE TABLE IF NOT EXISTS project_env (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -189,11 +215,22 @@ export function createStore(opts: CreateStoreOptions): Store {
     containerId: string;
     hostPort: number;
     status: string;
+    containerPort: number;
+    kind: string;
   }): Promise<{ id: string }> {
     const result = await pool.query<{ id: string }>(
-      `INSERT INTO deployments (project_id, version, container_id, host_port, status)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [input.projectId, input.version, input.containerId, input.hostPort, input.status],
+      `INSERT INTO deployments
+         (project_id, version, container_id, host_port, container_port, kind, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [
+        input.projectId,
+        input.version,
+        input.containerId,
+        input.hostPort,
+        input.containerPort,
+        input.kind,
+        input.status,
+      ],
     );
     return { id: result.rows[0].id };
   }
@@ -201,15 +238,27 @@ export function createStore(opts: CreateStoreOptions): Store {
   async function listDeployments(
     projectId: string,
   ): Promise<
-    Array<{ id: string; version: string; hostPort: number; status: string }>
+    Array<{
+      id: string;
+      version: string;
+      hostPort: number;
+      status: string;
+      containerPort: number;
+      kind: string;
+      createdAt: string | null;
+    }>
   > {
     const result = await pool.query<{
       id: string;
       version: string | null;
       host_port: number | null;
       status: string | null;
+      container_port: number | null;
+      kind: string | null;
+      created_at: Date | null;
     }>(
-      `SELECT id, version, host_port, status FROM deployments
+      `SELECT id, version, host_port, status, container_port, kind, created_at
+       FROM deployments
        WHERE project_id = $1 ORDER BY created_at ASC`,
       [projectId],
     );
@@ -218,7 +267,45 @@ export function createStore(opts: CreateStoreOptions): Store {
       version: r.version ?? "",
       hostPort: r.host_port ?? 0,
       status: r.status ?? "",
+      containerPort: r.container_port ?? 0,
+      kind: r.kind ?? "deploy",
+      createdAt: r.created_at ? r.created_at.toISOString() : null,
     }));
+  }
+
+  async function getDeploymentById(id: string): Promise<{
+    id: string;
+    projectId: string;
+    version: string;
+    containerPort: number;
+    status: string;
+  } | null> {
+    let result;
+    try {
+      result = await pool.query<{
+        id: string;
+        project_id: string;
+        version: string | null;
+        container_port: number | null;
+        status: string | null;
+      }>(
+        `SELECT id, project_id, version, container_port, status
+         FROM deployments WHERE id = $1 LIMIT 1`,
+        [id],
+      );
+    } catch {
+      // Malformed id (e.g. not a valid uuid) -> treat as not found.
+      return null;
+    }
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      version: row.version ?? "",
+      containerPort: row.container_port ?? 0,
+      status: row.status ?? "",
+    };
   }
 
   async function setEnv(opts: {
@@ -434,6 +521,7 @@ export function createStore(opts: CreateStoreOptions): Store {
     getProjectBySlug,
     recordDeployment,
     listDeployments,
+    getDeploymentById,
     setEnv,
     listEnv,
     deleteEnv,
