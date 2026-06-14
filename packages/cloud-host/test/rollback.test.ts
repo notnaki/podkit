@@ -103,6 +103,22 @@ function makeFixture(marker: string): string {
   return dir;
 }
 
+// Count running app containers for the "rb" project (reaping should keep this 1).
+async function countRbContainers(): Promise<number> {
+  const { stdout } = await execFileAsync("docker", [
+    "ps",
+    "--filter",
+    "label=" + TEST_LABEL,
+    "--format",
+    "{{.Names}}",
+  ]);
+  return stdout
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .filter((n) => n.startsWith("podkit-app-rb-")).length;
+}
+
 // Poll the gateway until the served body contains `marker`.
 async function waitForBody(marker: string): Promise<string> {
   let last = "";
@@ -244,6 +260,7 @@ describe("cloud-host deployments history + rollback (real Docker + Postgres)", (
       const dep1Body = await dep1.json();
       expect(dep1Body.ok).toBe(true);
       await waitForBody("served-by-blue");
+      expect(await countRbContainers()).toBe(1);
 
       // 3. Deploy v2 ("green") and confirm the URL now serves green.
       const greenDir = makeFixture("served-by-green");
@@ -254,6 +271,8 @@ describe("cloud-host deployments history + rollback (real Docker + Postgres)", (
       });
       expect((await dep2.json()).ok).toBe(true);
       await waitForBody("served-by-green");
+      // The blue container must have been reaped — only green runs now.
+      expect(await countRbContainers()).toBe(1);
 
       // 4. List deployment history: newest-first, green is active.
       const histRes = await fetch(apiUrl + "/v1/projects/rb/deployments", {
@@ -295,6 +314,9 @@ describe("cloud-host deployments history + rollback (real Docker + Postgres)", (
       expect(rbBody.ok).toBe(true);
       expect(rbBody.data.version).toBe(blueVersion);
       await waitForBody("served-by-blue");
+      // The green container must have been reaped by the rollback — only the
+      // rollback container runs now.
+      expect(await countRbContainers()).toBe(1);
 
       // 7. History now has three rows; the newest is a rollback to blue.
       const hist2 = await (
