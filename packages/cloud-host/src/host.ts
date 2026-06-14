@@ -313,6 +313,31 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // names of app containers we started, so close() can tear them down.
   const runningContainers: string[] = [];
 
+  // In-memory fixed-window rate limiter for CLI approval, keyed by accountId.
+  // A secondary defense against userCode brute-forcing: even with high entropy,
+  // we cap how fast an authenticated account can grind approval attempts.
+  const approveAttempts = new Map<
+    string,
+    { count: number; windowStart: number }
+  >();
+  const APPROVE_RATE_LIMIT = 10; // max attempts per window
+  const APPROVE_WINDOW_MS = 60000; // 60-second fixed window
+
+  function checkApproveRateLimit(accountId: string): boolean {
+    const now = Date.now();
+    const record = approveAttempts.get(accountId);
+    if (!record || now - record.windowStart >= APPROVE_WINDOW_MS) {
+      // No record, or the window has expired: start a fresh window.
+      approveAttempts.set(accountId, { count: 1, windowStart: now });
+      return true;
+    }
+    if (record.count >= APPROVE_RATE_LIMIT) {
+      return false; // rate limited
+    }
+    record.count++;
+    return true;
+  }
+
   // Resolved once listen() binds the gateway, used to build public URLs.
   let gatewayUrl = "";
 
@@ -648,7 +673,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   router.register("POST", "/v1/auth/cli/start", async () => {
     // Public: the device code itself is the secret used to poll for the token.
     const deviceCode = randomBytes(24).toString("hex");
-    const userCode = randomBytes(4).toString("hex");
+    const userCode = randomBytes(16).toString("hex");
     await store.createCliSession({ deviceCode, userCode });
     const consoleUrl =
       process.env.PODKIT_CONSOLE_URL ?? "http://localhost:5190";
@@ -695,6 +720,13 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   router.register("POST", "/v1/auth/cli/approve", async ({ headers, body }) => {
     const auth = await accountFromAuth(headers);
     if (!auth) return unauthorized();
+    // Secondary brute-force defense: cap approval attempts per account.
+    if (!checkApproveRateLimit(auth.accountId)) {
+      return {
+        status: 429,
+        body: fail("E_RATE_LIMITED", "too many approval attempts, try again later"),
+      };
+    }
     const b = (body ?? {}) as { userCode?: string };
     if (!b.userCode || typeof b.userCode !== "string") {
       return {
