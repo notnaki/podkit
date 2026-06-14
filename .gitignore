@@ -7,6 +7,9 @@ dist/
 build/
 .output/
 .podkit/
+# ...but `src/build/` is framework SOURCE (the bundler), not build output.
+!packages/framework/src/build/
+!packages/framework/src/build/**
 
 # env / secrets
 .env
