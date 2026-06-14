@@ -57,6 +57,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Product wave 2** (PR #26, secure-by-default): (1) **request metrics** — gateway records per-project `{requests, status buckets, avgLatency, lastSeen}`; ownership-gated `GET /v1/projects/:slug/metrics`. (2) **log `?limit`/`?since`**. (3) **CLI** `podkit cloud open <slug>` + `--table` output. (4) **read-only SQL runner** `POST /v1/projects/:slug/db/query` — ownership-gated, SELECT-only, statement-timeout + LIMIT, parameterized, runs as the **scoped non-superuser role**; scoped DB connection string now **stored encrypted at rest** (reused, no per-query rotation).
 - **Console UI** (PR #27): surfaces #26 in the cloud-console — **Metrics tab**, **Database tab** (read-only SQL console), **log filters** (lines/since), and copy-to-clipboard for URLs + connection string.
 - **Production app bundling** (PR #28): tenant containers no longer run the Vite dev server. `@podkit/framework` `buildApp()` (Vite client build w/ hashed assets + Vite SSR build of route modules + manifest) and a **Vite-free** `createProdServer()` (imports pre-compiled SSR modules, serves immutable-cached client assets). CLI `podkit build`/`start`; buildpack Dockerfile now `RUN`s build + `CMD`s `start`. (Edge/cold-start optimization still open.)
+- **Reap superseded containers** (PR #29): deploy/rollback now stops the container it replaced (after the routeMap cutover, so no dropped traffic) instead of leaking it until shutdown.
 
 ## 📋 To do — cloud hardening (toward production)
 
@@ -64,9 +65,8 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 2. **docker.sock host-escape** — the control-plane mounts the host Docker socket; move to a brokered build/run service or orchestrator. *(Architectural — needs sign-off.)* Smaller remaining container hardening: `--read-only` rootfs (+ writable tmpfs), pinned base-image digests, non-root control-plane (needs docker-group gid mapping).
 3. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains. *(Needs public DNS/reachability — hard to test locally.)*
 4. **Standalone buildpack** — support apps outside the monorepo (published packages).
-5. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources.
-6. **Cold-start / edge** — prod bundling shipped (#28); next is faster container cold-start + edge runtime.
-7. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
+5. **Cold-start / edge** — prod bundling shipped (#28); next is faster container cold-start + edge runtime.
+6. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
 
