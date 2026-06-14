@@ -85,13 +85,25 @@ type ReadableLike = {
   on(event: "error", listener: (err: unknown) => void): unknown;
 };
 
-export function readJson(req: ReadableLike): Promise<unknown> {
+export function readJson(req: ReadableLike, maxSize: number = 1_048_576): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    let total = 0;
+    let aborted = false;
     req.on("data", (chunk: unknown) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      if (aborted) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      total += buf.length;
+      if (total > maxSize) {
+        aborted = true;
+        chunks.length = 0;
+        reject(Object.assign(new Error("payload too large"), { code: "E_PAYLOAD_TOO_LARGE" }));
+        return;
+      }
+      chunks.push(buf);
     });
     req.on("end", () => {
+      if (aborted) return;
       const raw = Buffer.concat(chunks).toString("utf8");
       if (raw.trim().length === 0) {
         resolve({});

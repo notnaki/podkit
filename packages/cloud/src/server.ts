@@ -169,6 +169,10 @@ export function createControlPlane(opts: {
       });
       sendJson(res, r.status, r.body);
     } catch (err) {
+      if (err && typeof err === "object" && (err as { code?: unknown }).code === "E_PAYLOAD_TOO_LARGE") {
+        sendJson(res, 413, fail("E_PAYLOAD_TOO_LARGE", "request body too large"));
+        return;
+      }
       sendJson(res, 500, fail("E_UNKNOWN", err instanceof Error ? err.message : String(err)));
     }
   });
