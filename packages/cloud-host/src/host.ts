@@ -6,6 +6,7 @@ import {
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, createReadStream, statSync, realpathSync } from "node:fs";
 import { join, resolve, extname, relative, isAbsolute, sep } from "node:path";
+import { Client } from "pg";
 import { createStore } from "@podkit/cloud-store";
 import {
   buildImage,
@@ -16,6 +17,7 @@ import {
   buildPodkitApp,
 } from "@podkit/runtime";
 import { createGateway } from "@podkit/gateway";
+import { createMetricsRegistry } from "@podkit/telemetry";
 import {
   provisionDatabase,
   dropDatabase,
@@ -85,6 +87,31 @@ function mimeForExt(ext: string): string {
 function slugFromPath(path: string): string | null {
   const match = /^\/_p\/([^/?#]+)/.exec(path);
   return match ? match[1]! : null;
+}
+
+// Reject any SQL that is not a single, read-only SELECT. This is a deliberately
+// conservative allow/deny gate layered *in front of* the per-project scoped role
+// (which is the real isolation boundary — see provisionDatabase): even a parser
+// bypass here cannot reach another tenant's database. We:
+//   - require the statement to start with SELECT (allowlist),
+//   - reject any DML/DDL/admin verb or dangerous builtin (denylist),
+//   - reject multi-statement input (a ';' anywhere but an optional trailing one),
+// so DML, DDL, COPY, stored-proc calls, pg_sleep / pg_read_file / pg_ls_dir, and
+// stacked statements are all turned away before a connection is opened.
+function isSelectOnly(sql: string): boolean {
+  const trimmed = sql.trim();
+  if (!/^SELECT\b/i.test(trimmed)) return false;
+  if (
+    /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|VACUUM|pg_sleep|pg_read_file|pg_ls_dir)\b/i.test(
+      trimmed,
+    )
+  ) {
+    return false;
+  }
+  // Single statement only: a ';' is allowed solely as an optional trailing char.
+  const withoutTrailing = trimmed.replace(/;\s*$/, "");
+  if (withoutTrailing.includes(";")) return false;
+  return true;
 }
 
 // Broad classes of system / shared directories a build context must never point
@@ -341,6 +368,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // Resolved once listen() binds the gateway, used to build public URLs.
   let gatewayUrl = "";
 
+  // Sealed in-process registry of per-project request metrics (counts, status
+  // classes, latency only). Never persisted; resets on restart.
+  const metrics = createMetricsRegistry();
+
   const gateway = createGateway({
     resolve: ({ host, path }) => {
       // Path-based routing (/_p/<slug>) wins; otherwise fall back to the
@@ -353,7 +384,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }
       if (!slug) return null;
       const hostPort = routeMap.get(slug);
-      return hostPort ? { hostPort } : null;
+      // Thread the resolved slug out so onRequest can attribute the request.
+      return hostPort ? { hostPort, slug } : null;
+    },
+    onRequest: (m) => {
+      // Only record for requests that resolved to a known project slug.
+      if (m.slug) metrics.record({ slug: m.slug, statusCode: m.statusCode, latencyMs: m.latencyMs });
     },
   });
 
@@ -427,6 +463,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       adminConnectionString: opts.adminConnectionString,
       slug: b.slug,
     });
+    // Persist the scoped connection string (encrypted at rest) so the SQL runner
+    // can reuse it without re-provisioning (which would rotate the password).
+    await store.setProjectDbUrl(project.id, db.connectionString);
     return {
       status: 200,
       body: ok({
@@ -890,6 +929,46 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     const access = await authorizeProject(headers, project);
     if (access === "unauth") return unauthorized();
     if (access === "forbidden") return forbidden();
+    // Optional ?limit caps the number of returned log lines (bounds response
+    // size/memory). Must be an integer in 1..10000.
+    let tail: number | undefined;
+    const limitParam = query.get("limit");
+    if (limitParam !== null) {
+      const n = Number(limitParam);
+      if (
+        !Number.isInteger(n) ||
+        n < 1 ||
+        n > 10000 ||
+        !/^\d+$/.test(limitParam)
+      ) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "limit must be an integer between 1 and 10000",
+            "?limit=100",
+          ),
+        };
+      }
+      tail = n;
+    }
+    // Optional ?since filters by time. Must be a parseable date; the original
+    // string is forwarded to `docker logs --since` (ISO 8601 or relative).
+    let since: string | undefined;
+    const sinceParam = query.get("since");
+    if (sinceParam !== null) {
+      if (sinceParam === "" || Number.isNaN(new Date(sinceParam).getTime())) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "since must be a valid date",
+            "?since=2026-06-14T00:00:00Z",
+          ),
+        };
+      }
+      since = sinceParam;
+    }
     // Logs for a specific deployment (?deploymentId=...) or, by default, the
     // active one (the most recent deployment for this project).
     const wanted = query.get("deploymentId");
@@ -922,7 +1001,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     let logs = "";
     if (target.containerId) {
       try {
-        logs = await containerLogs(target.containerId);
+        logs = await containerLogs(target.containerId, { tail, since });
       } catch {
         logs = "";
       }
@@ -936,6 +1015,40 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }),
     };
   });
+
+  router.register(
+    "GET",
+    "/v1/projects/:slug/metrics",
+    async ({ headers, params }) => {
+      // Metrics are project-scoped operational data, so this endpoint requires
+      // credentials AND project ownership. The presence check runs first so
+      // unauthenticated callers can't probe project existence via 404s. Only
+      // counts, status classes, and latency are returned — never bodies,
+      // headers, env, paths, or other secrets.
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const snapshot = metrics.snapshot(slug) ?? {
+        requests: 0,
+        status2xx: 0,
+        status3xx: 0,
+        status4xx: 0,
+        status5xx: 0,
+        avgLatencyMs: 0,
+        lastSeen: 0,
+      };
+      return { status: 200, body: ok(snapshot) };
+    },
+  );
 
   router.register(
     "POST",
@@ -1127,6 +1240,131 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (access === "forbidden") return forbidden();
       await store.deleteEnv({ projectId: project.id, key });
       return { status: 200, body: ok({ deleted: key }) };
+    },
+  );
+
+  router.register(
+    "POST",
+    "/v1/projects/:slug/db/query",
+    async ({ headers, params, body }) => {
+      // Read-only SQL runner. Same guard ladder as the logs/env handlers: the
+      // mutation guard runs first so unauthenticated callers can't probe project
+      // existence via 404s, then ownership is enforced. The query itself runs as
+      // the per-project SCOPED non-superuser role (never adminConnectionString),
+      // so even a parser bypass cannot reach another tenant's database.
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+
+      const b = (body ?? {}) as { sql?: unknown; params?: unknown };
+      if (typeof b.sql !== "string" || b.sql.trim().length === 0) {
+        return {
+          status: 400,
+          body: fail(
+            "E_INVALID_QUERY",
+            "sql is required",
+            "POST {sql, params?} — a single read-only SELECT statement",
+          ),
+        };
+      }
+      if (!isSelectOnly(b.sql)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_INVALID_QUERY",
+            "only a single read-only SELECT statement is allowed",
+            "no DML/DDL/COPY/CALL, no stacked statements",
+          ),
+        };
+      }
+      // Caller values flow ONLY through pg $1..$N parameter slots (never string
+      // interpolation), so they can't alter the statement. Validate the shape.
+      let values: (string | number)[] = [];
+      if (b.params !== undefined) {
+        if (
+          !Array.isArray(b.params) ||
+          !b.params.every(
+            (p) => typeof p === "string" || typeof p === "number",
+          )
+        ) {
+          return {
+            status: 400,
+            body: fail(
+              "E_INVALID_QUERY",
+              "params must be an array of strings/numbers",
+              'POST {sql, params: ["a", 1]}',
+            ),
+          };
+        }
+        values = b.params as (string | number)[];
+      }
+      // Cap result memory by appending a LIMIT when the caller didn't supply one.
+      const sql = b.sql.trim().replace(/;\s*$/, "");
+      const capped = /\bLIMIT\b/i.test(sql) ? sql : sql + " LIMIT 1000";
+
+      // Connect as the project's SCOPED non-superuser role (<db>_app) — never
+      // the admin/superuser creds — so the query is confined to this one
+      // tenant's database (PUBLIC CONNECT is revoked on every other DB). The
+      // scoped connection string is stored (encrypted) at create time; we reuse
+      // it so we don't re-provision/rotate the password on every query. Projects
+      // created before this was added have no stored URL — provision once and
+      // persist it (a one-time rotation), then reuse thereafter.
+      let scopedConnectionString: string | null;
+      try {
+        scopedConnectionString = await store.getProjectDbUrl(project.id);
+        if (!scopedConnectionString) {
+          const provisioned = await provisionDatabase({
+            adminConnectionString: opts.adminConnectionString,
+            slug,
+          });
+          scopedConnectionString = provisioned.connectionString;
+          await store.setProjectDbUrl(project.id, scopedConnectionString);
+        }
+      } catch {
+        return {
+          status: 400,
+          body: fail("E_QUERY_FAILED", "could not run the query"),
+        };
+      }
+
+      if (!scopedConnectionString) {
+        return {
+          status: 400,
+          body: fail("E_QUERY_FAILED", "could not run the query"),
+        };
+      }
+      const db = new Client({ connectionString: scopedConnectionString });
+      try {
+        await db.connect();
+        // Bound runaway queries; constant, not interpolated user input.
+        await db.query("SET statement_timeout = 5000");
+        const result = await db.query(capped, values);
+        return {
+          status: 200,
+          body: ok({ rows: result.rows, rowCount: result.rowCount }),
+        };
+      } catch {
+        // Generic message only — never leak driver internals/SQLSTATE/stack.
+        return {
+          status: 400,
+          body: fail("E_QUERY_FAILED", "could not run the query"),
+        };
+      } finally {
+        try {
+          await db.end();
+        } catch {
+          // Ignore: connection may have failed to open.
+        }
+      }
     },
   );
 

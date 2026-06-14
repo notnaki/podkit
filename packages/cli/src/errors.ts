@@ -1,4 +1,4 @@
-export type ErrorCode = "E_UNKNOWN" | "E_NO_ROUTES" | "E_BAD_ARGS" | "E_NOT_IMPLEMENTED" | "E_UNAUTHORIZED" | "E_NETWORK";
+export type ErrorCode = "E_UNKNOWN" | "E_NO_ROUTES" | "E_BAD_ARGS" | "E_NOT_IMPLEMENTED" | "E_UNAUTHORIZED" | "E_NETWORK" | "E_BAD_STATE";
 
 const EXIT_CODES: Record<ErrorCode, number> = {
   E_BAD_ARGS: 2,
@@ -7,6 +7,7 @@ const EXIT_CODES: Record<ErrorCode, number> = {
   E_NETWORK: 1,
   E_NO_ROUTES: 1,
   E_UNKNOWN: 1,
+  E_BAD_STATE: 1,
 };
 
 export function exitCodeFor(code: string): number {

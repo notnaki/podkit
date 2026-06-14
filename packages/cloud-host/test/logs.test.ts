@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "pg";
 import { createCloud } from "../src/host.ts";
+import { containerLogs } from "@podkit/runtime";
 import { dropDatabase } from "@podkit/db-provision";
 
 const execFileAsync = promisify(execFile);
@@ -92,7 +93,12 @@ function makeFixture(marker: string): string {
     join(dir, "server.mjs"),
     [
       'import { createServer } from "node:http";',
-      `console.log(${JSON.stringify(marker)});`,
+      // Emit several distinct lines on boot so ?limit can be exercised.
+      `console.log(${JSON.stringify(marker)} + "-1");`,
+      `console.log(${JSON.stringify(marker)} + "-2");`,
+      `console.log(${JSON.stringify(marker)} + "-3");`,
+      `console.log(${JSON.stringify(marker)} + "-4");`,
+      `console.log(${JSON.stringify(marker)} + "-5");`,
       "createServer((_req, res) => {",
       '  res.writeHead(200, { "content-type": "text/plain" });',
       '  res.end("ok");',
@@ -260,7 +266,106 @@ describe("cloud-host runtime logs (real Docker + Postgres)", () => {
       if (!found) {
         throw new Error("logs never contained marker. last=" + lastLogs);
       }
+
+      const countNonEmpty = (s: string) =>
+        s.split("\n").filter((l) => l.trim().length > 0).length;
+
+      // (e) regression: no-params GET still returns the full set of log lines.
+      const full = await (
+        await fetch(apiUrl + "/v1/projects/lg/logs", { headers: keyHeader })
+      ).json();
+      expect(full.ok).toBe(true);
+      expect(countNonEmpty(full.data.logs as string)).toBeGreaterThanOrEqual(5);
+
+      // (a) ?limit=2 -> at most 2 non-empty lines returned.
+      const limited = await (
+        await fetch(apiUrl + "/v1/projects/lg/logs?limit=2", {
+          headers: keyHeader,
+        })
+      ).json();
+      expect(limited.ok).toBe(true);
+      expect(countNonEmpty(limited.data.logs as string)).toBeLessThanOrEqual(2);
+
+      // (b) out-of-range / non-integer limits -> 400 E_BAD_ARGS.
+      for (const bad of ["0", "99999", "-1", "abc", "1.5"]) {
+        const res = await fetch(
+          apiUrl + "/v1/projects/lg/logs?limit=" + bad,
+          { headers: keyHeader },
+        );
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.ok).toBe(false);
+        expect(body.error.code).toBe("E_BAD_ARGS");
+      }
+
+      // (c) ?since=not-a-date -> 400 E_BAD_ARGS.
+      const badSince = await fetch(
+        apiUrl + "/v1/projects/lg/logs?since=not-a-date",
+        { headers: keyHeader },
+      );
+      expect(badSince.status).toBe(400);
+      const badSinceBody = await badSince.json();
+      expect(badSinceBody.ok).toBe(false);
+      expect(badSinceBody.error.code).toBe("E_BAD_ARGS");
+
+      // (d) ?since=<valid ISO> -> 200, no crash.
+      const okSince = await fetch(
+        apiUrl + "/v1/projects/lg/logs?since=2000-01-01T00:00:00Z",
+        { headers: keyHeader },
+      );
+      expect(okSince.status).toBe(200);
+      const okSinceBody = await okSince.json();
+      expect(okSinceBody.ok).toBe(true);
+
+      // authz: a non-owner bearer is forbidden (403) regardless of params.
+      const reg = await fetch(apiUrl + "/v1/auth/signup", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          email: "intruder-" + randomBytes(4).toString("hex") + "@example.com",
+          password: "password123",
+        }),
+      });
+      const regBody = await reg.json();
+      expect(regBody.ok).toBe(true);
+      const intruderToken = regBody.data.token as string;
+      const forbidden = await fetch(
+        apiUrl + "/v1/projects/lg/logs?limit=2",
+        { headers: { authorization: "Bearer " + intruderToken } },
+      );
+      expect(forbidden.status).toBe(403);
     },
     240000,
   );
+
+  it("containerLogs builds the expected argv for tail/since", async () => {
+    // Hitting a name that does not exist; we only care about the argv docker
+    // was invoked with, captured via the error message docker emits.
+    const name = "podkit-no-such-" + randomBytes(4).toString("hex");
+    let err: unknown = null;
+    try {
+      await containerLogs(name, { tail: 5, since: "2026-06-14T00:00:00Z" });
+    } catch (e) {
+      err = e;
+    }
+    // execFile surfaces the full argv on its error object.
+    const cmd = String((err as { cmd?: string })?.cmd ?? err);
+    expect(cmd).toContain("logs");
+    expect(cmd).toContain("--tail");
+    expect(cmd).toContain("5");
+    expect(cmd).toContain("--since");
+    expect(cmd).toContain("2026-06-14T00:00:00Z");
+    expect(cmd).toContain(name);
+
+    // No opts -> bare `docker logs <name>`, no --tail/--since.
+    let err2: unknown = null;
+    try {
+      await containerLogs(name);
+    } catch (e) {
+      err2 = e;
+    }
+    const cmd2 = String((err2 as { cmd?: string })?.cmd ?? err2);
+    expect(cmd2).not.toContain("--tail");
+    expect(cmd2).not.toContain("--since");
+  });
 });

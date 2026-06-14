@@ -18,6 +18,11 @@ export type Store = {
   getProjectBySlug: (
     slug: string,
   ) => Promise<{ id: string; slug: string; owner: string } | null>;
+  // Store/read the project's scoped DB connection string, encrypted at rest
+  // (same key as project_env). Used by the read-only SQL runner so it never
+  // re-provisions / rotates creds per query.
+  setProjectDbUrl: (projectId: string, connectionString: string) => Promise<void>;
+  getProjectDbUrl: (projectId: string) => Promise<string | null>;
   recordDeployment: (input: {
     projectId: string;
     version: string;
@@ -117,9 +122,13 @@ export function createStore(opts: CreateStoreOptions): Store {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         slug text UNIQUE NOT NULL,
         owner text,
+        db_url text,
         created_at timestamp DEFAULT now()
       )
     `);
+    await pool.query(
+      `ALTER TABLE projects ADD COLUMN IF NOT EXISTS db_url text`,
+    );
     await pool.query(`
       CREATE TABLE IF NOT EXISTS deployments (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -237,6 +246,31 @@ export function createStore(opts: CreateStoreOptions): Store {
     const row = result.rows[0];
     if (!row) return null;
     return { id: row.id, slug: row.slug, owner: row.owner ?? "" };
+  }
+
+  async function setProjectDbUrl(
+    projectId: string,
+    connectionString: string,
+  ): Promise<void> {
+    // Encrypt the scoped DB connection string at rest when a key is configured.
+    const stored = secretsKey
+      ? encryptValue(connectionString, secretsKey)
+      : connectionString;
+    await pool.query(`UPDATE projects SET db_url = $1 WHERE id = $2`, [
+      stored,
+      projectId,
+    ]);
+  }
+
+  async function getProjectDbUrl(projectId: string): Promise<string | null> {
+    const result = await pool.query<{ db_url: string | null }>(
+      `SELECT db_url FROM projects WHERE id = $1 LIMIT 1`,
+      [projectId],
+    );
+    const row = result.rows[0];
+    if (!row || !row.db_url) return null;
+    // decryptValue passes legacy plaintext through and degrades gracefully.
+    return secretsKey ? decryptValue(row.db_url, secretsKey) : row.db_url;
   }
 
   async function recordDeployment(input: {
@@ -592,6 +626,8 @@ export function createStore(opts: CreateStoreOptions): Store {
     createProject,
     listProjects,
     getProjectBySlug,
+    setProjectDbUrl,
+    getProjectDbUrl,
     recordDeployment,
     listDeployments,
     getDeploymentById,

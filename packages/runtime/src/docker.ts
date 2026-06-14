@@ -107,13 +107,42 @@ export async function stopContainer(name: string): Promise<void> {
   }
 }
 
+export interface ContainerLogsOptions {
+  /** Limit output to the last N lines (maps to `docker logs --tail N`). */
+  tail?: number;
+  /**
+   * Only show logs since this time. Passed straight to `docker logs --since`,
+   * which accepts ISO 8601 timestamps and relative durations (e.g. "10m").
+   * Letting docker do the filtering avoids brittle in-process timestamp parsing.
+   */
+  since?: string;
+}
+
 /**
  * Read the logs of a container by name.
- * Runs `docker logs <name>`. Docker writes logs to both stdout and stderr,
- * so both streams are concatenated.
+ * Runs `docker logs [--tail N] [--since S] <name>`. Docker writes logs to both
+ * stdout and stderr, so both streams are concatenated.
+ *
+ * `tail`/`since` are passed as separate execFile argv elements (never shell
+ * interpolated), so untrusted values cannot inject commands.
  */
-export async function containerLogs(name: string): Promise<string> {
-  const { stdout, stderr } = await execFileAsync("docker", ["logs", name]);
+export async function containerLogs(
+  name: string,
+  opts?: ContainerLogsOptions,
+): Promise<string> {
+  const args = ["logs"];
+  if (
+    opts?.tail !== undefined &&
+    Number.isInteger(opts.tail) &&
+    opts.tail > 0
+  ) {
+    args.push("--tail", String(opts.tail));
+  }
+  if (opts?.since !== undefined && opts.since !== "") {
+    args.push("--since", opts.since);
+  }
+  args.push(name);
+  const { stdout, stderr } = await execFileAsync("docker", args);
   return stdout + stderr;
 }
 
