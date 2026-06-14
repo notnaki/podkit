@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, getConfig } from "../api/client.ts";
+import { api, getToken } from "../api/client.ts";
 import { useApi } from "../lib/useApi.ts";
 
 const TABS = ["Overview", "Deployments", "Storage", "Settings"] as const;
@@ -108,7 +108,7 @@ function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version:
   const [busy, setBusy] = useState(false);
   const [ctx, setCtx] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const hasKey = getConfig().key !== "";
+  const hasKey = getToken() !== "";
 
   async function deploy() {
     setBusy(true); setNote(null);
@@ -123,7 +123,7 @@ function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version:
       <section className="panel">
         <div className="panel-head"><h3>Deploy</h3></div>
         <div className="panel-body stack">
-          {!hasKey && <span className="status status-building"><span className="dot" />set an API key in Connect to deploy</span>}
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to deploy</span>}
           <div className="field"><label>Build context (path to the app)</label><input className="input mono" placeholder="/abs/path/to/app" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
           {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
           <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !ctx.trim()} onClick={deploy}>{busy ? "Building…" : "Deploy"}</button></div>
