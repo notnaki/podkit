@@ -34,6 +34,7 @@ export type Store = {
       hostPort: number;
       status: string;
       containerPort: number;
+      containerId: string;
       kind: string;
       createdAt: string | null;
     }>
@@ -43,6 +44,7 @@ export type Store = {
     projectId: string;
     version: string;
     containerPort: number;
+    containerId: string;
     status: string;
   } | null>;
   setEnv: (opts: {
@@ -244,6 +246,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       hostPort: number;
       status: string;
       containerPort: number;
+      containerId: string;
       kind: string;
       createdAt: string | null;
     }>
@@ -254,10 +257,11 @@ export function createStore(opts: CreateStoreOptions): Store {
       host_port: number | null;
       status: string | null;
       container_port: number | null;
+      container_id: string | null;
       kind: string | null;
       created_at: Date | null;
     }>(
-      `SELECT id, version, host_port, status, container_port, kind, created_at
+      `SELECT id, version, host_port, status, container_port, container_id, kind, created_at
        FROM deployments
        WHERE project_id = $1 ORDER BY created_at ASC`,
       [projectId],
@@ -268,6 +272,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       hostPort: r.host_port ?? 0,
       status: r.status ?? "",
       containerPort: r.container_port ?? 0,
+      containerId: r.container_id ?? "",
       kind: r.kind ?? "deploy",
       createdAt: r.created_at ? r.created_at.toISOString() : null,
     }));
@@ -278,6 +283,7 @@ export function createStore(opts: CreateStoreOptions): Store {
     projectId: string;
     version: string;
     containerPort: number;
+    containerId: string;
     status: string;
   } | null> {
     let result;
@@ -287,9 +293,10 @@ export function createStore(opts: CreateStoreOptions): Store {
         project_id: string;
         version: string | null;
         container_port: number | null;
+        container_id: string | null;
         status: string | null;
       }>(
-        `SELECT id, project_id, version, container_port, status
+        `SELECT id, project_id, version, container_port, container_id, status
          FROM deployments WHERE id = $1 LIMIT 1`,
         [id],
       );
@@ -304,6 +311,7 @@ export function createStore(opts: CreateStoreOptions): Store {
       projectId: row.project_id,
       version: row.version ?? "",
       containerPort: row.container_port ?? 0,
+      containerId: row.container_id ?? "",
       status: row.status ?? "",
     };
   }

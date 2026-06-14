@@ -118,6 +118,7 @@ describe("cloud-store", () => {
       expect(deployments[0].hostPort).toBe(8080);
       expect(deployments[0].status).toBe("running");
       expect(deployments[0].containerPort).toBe(3000);
+      expect(deployments[0].containerId).toBe("abc123");
       expect(deployments[0].kind).toBe("deploy");
       expect(deployments[0].createdAt).toBeTruthy();
     },
@@ -162,6 +163,7 @@ describe("cloud-store", () => {
       expect(target!.projectId).toBe(project.id);
       expect(target!.version).toBe("v1");
       expect(target!.containerPort).toBe(3000);
+      expect(target!.containerId).toBe("c-v1");
 
       // A rollback re-runs v1 as a new (newest) deployment.
       await new Promise((r) => setTimeout(r, 10));

@@ -86,7 +86,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, deployments <slug>, rollback <slug> <deploymentId>, env, domains, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -354,6 +354,16 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
       return await callControlPlane("POST", `/v1/projects/${slug}/rollback`, {
         deploymentId,
       });
+    }
+
+    if (subcommand === "logs") {
+      const [slug] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "logs requires a slug", AVAILABLE),
+        );
+      }
+      return await callControlPlane("GET", `/v1/projects/${slug}/logs`);
     }
 
     if (subcommand === "env") {
