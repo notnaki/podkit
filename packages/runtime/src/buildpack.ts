@@ -43,13 +43,20 @@ export function isPodkitApp(appDir: string): boolean {
  */
 export function generatePodkitDockerfile(opts: GeneratePodkitDockerfileOptions): string {
   const port = opts.port ?? 3000;
+  // Build steps run as root (corepack/pnpm need to write into the global store
+  // and node_modules). Once install completes, hand ownership of /app to the
+  // unprivileged `node` user (uid 1000, present in the node:22 image) and drop
+  // privileges via USER so the tenant app process never runs as root. Port
+  // ${port} is non-privileged (>1024), so binding works without root.
   return `FROM node:22
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY . .
 RUN pnpm install --frozen-lockfile=false
+RUN chown -R node:node /app
 WORKDIR /app/${opts.appSubpath}
 EXPOSE ${port}
+USER node
 CMD ["node","/app/packages/cli/src/bin.ts","dev","--port","${port}"]
 `;
 }

@@ -161,6 +161,8 @@ describe("cloud-host account auth + CLI device flow (real Docker + Postgres)", (
       const userCode = startBody.data.userCode as string;
       expect(typeof deviceCode).toBe("string");
       expect(typeof userCode).toBe("string");
+      // userCode is randomBytes(16) hex => 128 bits of entropy, 32 chars.
+      expect(userCode).toHaveLength(32);
       // verifyUrl must NOT contain a pre-filled code (anti-phishing)
       expect(startBody.data.verifyUrl).not.toContain("?code=");
       expect(startBody.data.verifyUrl).toContain("/#/cli");
@@ -251,6 +253,70 @@ describe("cloud-host account auth + CLI device flow (real Docker + Postgres)", (
       expect(shortPwBody.ok).toBe(false);
       expect(shortPwBody.error.code).toBe("E_BAD_ARGS");
       expect(shortPwBody.error.message).toMatch(/8 characters/);
+    },
+    120000,
+  );
+
+  it(
+    "rate-limits CLI approval after 10 attempts per account within the window",
+    async () => {
+      // Fresh account so this account's rate-limit counter is isolated.
+      const signupRes = await fetch(apiUrl + "/v1/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: `ratelimit-${randomBytes(4).toString("hex")}@b.com`,
+          password: "pw123456",
+        }),
+      });
+      expect(signupRes.status).toBe(200);
+      const token = (await signupRes.json()).data.token as string;
+
+      const approve = (userCode: string) =>
+        fetch(apiUrl + "/v1/auth/cli/approve", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: "Bearer " + token,
+          },
+          body: JSON.stringify({ userCode }),
+        });
+
+      // First 10 attempts are allowed (each fails with 400 because the
+      // userCode is bogus, but they are NOT rate-limited).
+      for (let i = 0; i < 10; i++) {
+        const res = await approve(randomBytes(16).toString("hex"));
+        expect(res.status).toBe(400);
+        expect((await res.json()).error.code).toBe("E_BAD_ARGS");
+      }
+
+      // 11th attempt within the window is rate-limited.
+      const limitedRes = await approve(randomBytes(16).toString("hex"));
+      expect(limitedRes.status).toBe(429);
+      const limitedBody = await limitedRes.json();
+      expect(limitedBody.ok).toBe(false);
+      expect(limitedBody.error.code).toBe("E_RATE_LIMITED");
+
+      // A different account is not affected (independent counter).
+      const otherSignup = await fetch(apiUrl + "/v1/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email: `ratelimit-${randomBytes(4).toString("hex")}@b.com`,
+          password: "pw123456",
+        }),
+      });
+      const otherToken = (await otherSignup.json()).data.token as string;
+      const otherRes = await fetch(apiUrl + "/v1/auth/cli/approve", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer " + otherToken,
+        },
+        body: JSON.stringify({ userCode: randomBytes(16).toString("hex") }),
+      });
+      // Not 429 — its own window is fresh (400 for bogus code).
+      expect(otherRes.status).toBe(400);
     },
     120000,
   );

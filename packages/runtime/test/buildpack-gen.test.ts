@@ -27,4 +27,16 @@ describe("buildpack generator", () => {
       'CMD ["node","/app/packages/cli/src/bin.ts","dev","--port","3000"]',
     );
   });
+
+  it("generates a Dockerfile that drops to the non-root node user", () => {
+    const dockerfile = generatePodkitDockerfile({ appSubpath: "examples/hello", port: 3000 });
+    expect(dockerfile).toContain("RUN chown -R node:node /app");
+    expect(dockerfile).toContain("USER node");
+    // USER must come after the chown (so root can hand off ownership) and
+    // before CMD (so the app process runs unprivileged).
+    expect(dockerfile.indexOf("RUN chown -R node:node /app")).toBeLessThan(
+      dockerfile.indexOf("USER node"),
+    );
+    expect(dockerfile.indexOf("USER node")).toBeLessThan(dockerfile.indexOf("CMD ["));
+  });
 });
