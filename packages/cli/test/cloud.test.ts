@@ -1,9 +1,57 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { createServer, type Server } from "node:http";
+import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
 import {
   cloudCommand,
   formatTable,
   __setSpawnForTest,
 } from "../src/commands/cloud.ts";
+
+// Build a fake `tar` child process: a Readable stdout that emits a tiny gzip-ish
+// payload then closes with the given exit code. stderr is a Readable too.
+function fakeTar(exitCode: number, stdoutBytes: Buffer): any {
+  const child = new EventEmitter() as any;
+  child.stdout = Readable.from([stdoutBytes]);
+  child.stderr = Readable.from([]);
+  child.kill = () => {};
+  // Emit close after stdout has been consumed (next tick).
+  child.stdout.on("end", () => {
+    setImmediate(() => child.emit("close", exitCode));
+  });
+  return child;
+}
+
+// Start a one-shot HTTP server that replies with `status` + `bodyJson` and
+// drains the request body. Returns the base URL + a close fn.
+function startStubServer(
+  status: number,
+  bodyJson: unknown,
+): Promise<{ url: string; close: () => Promise<void>; received: () => number }> {
+  let receivedBytes = 0;
+  const server: Server = createServer((req, res) => {
+    req.on("data", (c: Buffer) => {
+      receivedBytes += c.length;
+    });
+    req.on("end", () => {
+      res.statusCode = status;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify(bodyJson));
+    });
+  });
+  return new Promise((resolvePromise) => {
+    server.listen(0, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolvePromise({
+        url: `http://localhost:${port}`,
+        received: () => receivedBytes,
+        close: () =>
+          new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
 
 describe("cloudCommand argument validation", () => {
   it("rejects an unknown subcommand", async () => {
@@ -102,6 +150,117 @@ describe("cloudCommand open", () => {
       })) as unknown as typeof fetch,
     );
     const res = await cloudCommand(["open", "demo"]);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("E_BAD_STATE");
+  });
+});
+
+describe("cloudCommand deploy (upload flow)", () => {
+  // Point auth file at a nonexistent path so readAuth() returns null and
+  // PODKIT_API_URL/PODKIT_API_KEY drive resolveBase()/authHeaders() — keeps the
+  // test hermetic regardless of any real ~/.podkit/auth.json on the machine.
+  beforeEach(() => {
+    process.env.PODKIT_AUTH_FILE = "/nonexistent/podkit-test-auth.json";
+  });
+  afterEach(() => {
+    __setSpawnForTest(null);
+    delete process.env.PODKIT_API_URL;
+    delete process.env.PODKIT_API_KEY;
+    delete process.env.PODKIT_AUTH_FILE;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects deploy without a slug", async () => {
+    const res = await cloudCommand(["deploy"]);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe("E_BAD_ARGS");
+  });
+
+  it("tars the context and POSTs the gzip stream to /deploy-upload", async () => {
+    const stub = await startStubServer(200, {
+      ok: true,
+      data: { version: "vabc", url: "http://gw/_p/demo/" },
+    });
+    process.env.PODKIT_API_URL = stub.url;
+    process.env.PODKIT_API_KEY = "k";
+
+    const payload = Buffer.from("FAKE_GZIP_TARBALL_BYTES");
+    let spawnArgs: string[] = [];
+    const spawnSpy = vi.fn((_cmd: string, args: string[]) => {
+      spawnArgs = args;
+      return fakeTar(0, payload);
+    });
+    __setSpawnForTest(spawnSpy as never);
+
+    const res = await cloudCommand(["deploy", "demo"]);
+    await stub.close();
+
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.data as any).version).toBe("vabc");
+    // tar was invoked to gzip the context with the standard excludes.
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    expect(spawnArgs).toContain("-czf");
+    expect(spawnArgs).toContain("--exclude=node_modules");
+    expect(spawnArgs).toContain("--exclude=.git");
+    // The server received the streamed tar bytes.
+    expect(stub.received()).toBe(payload.length);
+  });
+
+  it("maps a 413 response to a friendly excludes hint", async () => {
+    const stub = await startStubServer(413, {
+      ok: false,
+      error: { code: "E_PAYLOAD_TOO_LARGE", message: "too large" },
+    });
+    process.env.PODKIT_API_URL = stub.url;
+    process.env.PODKIT_API_KEY = "k";
+    __setSpawnForTest(
+      vi.fn(() => fakeTar(0, Buffer.from("x"))) as never,
+    );
+
+    const res = await cloudCommand(["deploy", "demo"]);
+    await stub.close();
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("E_BAD_STATE");
+      expect(String(res.error.hint)).toContain("node_modules");
+    }
+  });
+
+  it("maps a 400 response to a repack hint with the server message", async () => {
+    const stub = await startStubServer(400, {
+      ok: false,
+      error: { code: "E_BAD_ARGS", message: "tarball contains an absolute path entry" },
+    });
+    process.env.PODKIT_API_URL = stub.url;
+    process.env.PODKIT_API_KEY = "k";
+    __setSpawnForTest(
+      vi.fn(() => fakeTar(0, Buffer.from("x"))) as never,
+    );
+
+    const res = await cloudCommand(["deploy", "demo"]);
+    await stub.close();
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.error.code).toBe("E_BAD_ARGS");
+      expect(res.error.message).toContain("absolute path");
+      expect(String(res.error.hint)).toContain("repack");
+    }
+  });
+
+  it("fails when tar exits non-zero", async () => {
+    const stub = await startStubServer(200, { ok: true, data: {} });
+    process.env.PODKIT_API_URL = stub.url;
+    process.env.PODKIT_API_KEY = "k";
+    __setSpawnForTest(
+      vi.fn(() => fakeTar(2, Buffer.from(""))) as never,
+    );
+
+    const res = await cloudCommand(["deploy", "demo"]);
+    await stub.close();
+
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error.code).toBe("E_BAD_STATE");
   });

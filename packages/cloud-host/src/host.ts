@@ -4,7 +4,21 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, createReadStream, statSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  createReadStream,
+  createWriteStream,
+  statSync,
+  realpathSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readdirSync,
+  lstatSync,
+} from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { tmpdir } from "node:os";
 import { join, resolve, extname, relative, isAbsolute, sep } from "node:path";
 import { Client } from "pg";
 import { createStore } from "@podkit/cloud-store";
@@ -255,6 +269,208 @@ function validateContextDir(
   return { path: real };
 }
 
+const execFileAsync = promisify(execFile);
+
+// Hard ceiling on an uploaded tarball, enforced while streaming to disk so a
+// malicious/oversized upload is rejected (413) without ever buffering the whole
+// body in memory. 500 MiB is generous for source + a small lockfile/asset set
+// but far below anything that should reach a single-host control plane.
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MiB
+
+// Stream a request body to `destPath` with a bounded size guard. Resolves once
+// the body is fully written; rejects with code "E_PAYLOAD_TOO_LARGE" the instant
+// the cumulative byte count exceeds maxBytes (the stream is destroyed and the
+// partial file removed). Backpressure is preserved by piping into the file
+// write stream, so a fast client cannot blow up control-plane memory: Node only
+// buffers up to the write stream's highWaterMark before pausing the socket.
+function streamUploadToFile(
+  req: IncomingMessage,
+  destPath: string,
+  maxBytes: number,
+): Promise<void> {
+  return new Promise<void>((resolvePromise, reject) => {
+    const out = createWriteStream(destPath);
+    let total = 0;
+    let settled = false;
+
+    const cleanupAndReject = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      // Stop writing; best-effort remove the partial file. We deliberately do
+      // NOT destroy the request socket here — the caller drains it and sends a
+      // proper status response (e.g. 413). Destroying mid-upload would reset the
+      // connection and the client would see a socket error instead of our JSON.
+      req.unpipe(out);
+      out.destroy();
+      try {
+        rmSync(destPath, { force: true });
+      } catch {
+        // best-effort
+      }
+      reject(err);
+    };
+
+    req.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        cleanupAndReject(
+          Object.assign(new Error("payload too large"), {
+            code: "E_PAYLOAD_TOO_LARGE",
+          }),
+        );
+      }
+    });
+    req.on("error", (err) => cleanupAndReject(err as Error));
+    out.on("error", (err) => cleanupAndReject(err as Error));
+    out.on("finish", () => {
+      if (settled) return;
+      settled = true;
+      resolvePromise();
+    });
+
+    req.pipe(out);
+  });
+}
+
+// Recursively audit every extracted entry and reject if any of them escapes
+// `extractDir`. realpathSync collapses symlinks and ".." to the true on-disk
+// location, so a crafted symlink or "../.." entry cannot disguise itself: we
+// resolve each entry and confirm it is still within extractDir. Symlinks are
+// detected via lstat (which does NOT follow the link) and their resolved target
+// is validated explicitly. Returns true when the tree is safe.
+function validateExtractedPaths(extractDir: string): boolean {
+  const realRoot = realpathSync(extractDir);
+
+  const walk = (dir: string): boolean => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry);
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(full);
+      } catch {
+        return false;
+      }
+      if (stat.isSymbolicLink()) {
+        // Resolve the link target's real path; reject if it escapes the root.
+        let target: string;
+        try {
+          target = realpathSync(full);
+        } catch {
+          // A symlink whose target cannot be resolved (dangling or outside the
+          // dir) is rejected — we never follow an unverifiable link.
+          return false;
+        }
+        if (!isWithin(realRoot, target) && target !== realRoot) {
+          return false;
+        }
+        // Do not descend through symlinks (target already validated as inside).
+        continue;
+      }
+      // For real files/dirs, resolve and confirm containment.
+      let real: string;
+      try {
+        real = realpathSync(full);
+      } catch {
+        return false;
+      }
+      if (!isWithin(realRoot, real) && real !== realRoot) {
+        return false;
+      }
+      if (stat.isDirectory()) {
+        if (!walk(full)) return false;
+      }
+    }
+    return true;
+  };
+
+  return walk(realRoot);
+}
+
+// Synchronously extract a gzipped tarball into a FRESH directory with strict
+// path-traversal protection, then return the extracted dir on success. The
+// caller owns cleanup of `extractDir` (we do NOT rm it here on success so the
+// build can read from it); on ANY failure we clean it up before rejecting so no
+// partial/malicious state leaks. Defense is layered: a pre-flight `tar -tzf`
+// listing audit (reject absolute / ".." entries), portable extraction (plain
+// `tar -xzf -C`, no -P, so tar strips leading "/" and refuses ".."), and a
+// post-extract realpath/symlink audit (validateExtractedPaths).
+async function extractTarGz(
+  tarPath: string,
+  extractDir: string,
+): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
+  try {
+    // Pre-flight audit of the archive listing: reject absolute paths and any
+    // ".." segment BEFORE writing a single file to disk. `tar -tzf` lists
+    // entries without extracting.
+    try {
+      const { stdout } = await execFileAsync("tar", ["-tzf", tarPath]);
+      const entries = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+      for (const e of entries) {
+        if (e.startsWith("/")) {
+          return {
+            ok: false,
+            code: "E_BAD_ARGS",
+            message: "tarball contains an absolute path entry",
+          };
+        }
+        if (e.split("/").some((seg) => seg === "..")) {
+          return {
+            ok: false,
+            code: "E_BAD_ARGS",
+            message: "tarball contains a parent-directory (..) entry",
+          };
+        }
+      }
+    } catch {
+      return {
+        ok: false,
+        code: "E_BAD_ARGS",
+        message: "tarball is corrupted or not a valid gzip archive",
+      };
+    }
+
+    // Extract with portable, safe flags (works on both GNU and BSD/macOS tar).
+    // We deliberately OMIT -P / --absolute-names so tar strips any leading "/"
+    // and refuses ".." entries by default (BSD tar errors on "..", GNU tar
+    // strips the path) — combined with the pre-flight listing audit above and
+    // the post-extract realpath audit below, this is layered defense. -C
+    // confines all output to the fresh extraction dir.
+    try {
+      await execFileAsync("tar", ["-xzf", tarPath, "-C", extractDir]);
+    } catch {
+      return {
+        ok: false,
+        code: "E_BAD_ARGS",
+        message: "tarball could not be extracted",
+      };
+    }
+
+    // Post-extract audit: realpath every entry and reject escaping symlinks or
+    // any path that resolves outside the extract dir.
+    if (!validateExtractedPaths(extractDir)) {
+      return {
+        ok: false,
+        code: "E_BAD_ARGS",
+        message: "tarball contains an entry that escapes the extraction directory",
+      };
+    }
+
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      code: "E_BAD_ARGS",
+      message: "tarball could not be processed",
+    };
+  }
+}
+
 export function createCloud(opts: CreateCloudOptions): Cloud {
   const store = createStore({
     connectionString: opts.controlPlaneConnectionString,
@@ -291,6 +507,21 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     } catch {
       return resolve(raw);
     }
+  })();
+
+  // Root under which uploaded tarballs are streamed and extracted. Prefers an
+  // operator-set PODKIT_BUILDS_ROOT (so uploads land on the same dedicated,
+  // quota-enforced volume as local-path builds), then PODKIT_CONTROL_PLANE_ROOT
+  // /builds, then the OS temp dir as a last resort. Per-project subdirs are
+  // created on demand. We resolve (not realpath) so a not-yet-existing dir is
+  // still usable; we mkdir -p it before first use.
+  const uploadsRoot = (() => {
+    const raw =
+      process.env.PODKIT_BUILDS_ROOT ??
+      (process.env.PODKIT_CONTROL_PLANE_ROOT
+        ? join(process.env.PODKIT_CONTROL_PLANE_ROOT, "builds")
+        : join(tmpdir(), "podkit-builds"));
+    return resolve(raw);
   })();
 
   // Resolve an authenticated account from an Authorization: Bearer <token>
@@ -530,6 +761,60 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
 
     return { version, hostPort, containerName: name };
+  }
+
+  // Orchestrate the upload-based deploy: extract the uploaded tarball into a
+  // FRESH temp subdir, audit every entry for path traversal / escaping symlinks,
+  // then build+run from the extracted dir via buildAndDeploy. The extracted dir
+  // and the uploaded tarball are ALWAYS removed in the finally block — on
+  // success, failure, or thrown error — so no tenant source or partial state
+  // ever leaks on disk. `extractParent` is the per-upload directory that holds
+  // both the tarball and the extraction subdir; we rm -rf the whole thing.
+  async function extractAndBuild(input: {
+    tarPath: string;
+    extractParent: string;
+    slug: string;
+    projectId: string;
+    containerPort: number;
+    appSubpath?: string;
+    extraEnv?: Record<string, string>;
+  }): Promise<DeployResult> {
+    const extractDir = join(input.extractParent, "extracted");
+    try {
+      mkdirSync(extractDir, { recursive: true });
+      const extracted = await extractTarGz(input.tarPath, extractDir);
+      if (!extracted.ok) {
+        return {
+          error: {
+            status: 400,
+            code: extracted.code,
+            message: extracted.message,
+          },
+        };
+      }
+      // The extracted dir is a fresh, audited, control-plane-owned path, so it
+      // is a valid build context by construction; pass it straight through.
+      return await buildAndDeploy({
+        slug: input.slug,
+        projectId: input.projectId,
+        contextDir: extractDir,
+        appSubpath: input.appSubpath,
+        containerPort: input.containerPort,
+        kind: "deploy",
+        branchId: null,
+        extraEnv: input.extraEnv,
+      });
+    } finally {
+      // Guaranteed cleanup: rm -rf the entire per-upload dir (tarball + extracted
+      // tree). Node's single-threaded event loop runs this finally before the
+      // next request is handled. Best-effort: a failed rm only leaks disk, which
+      // the operator monitors on the dedicated builds volume.
+      try {
+        rmSync(input.extractParent, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
   }
 
   // Resolved once listen() binds the gateway, used to build public URLs.
@@ -2025,6 +2310,181 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
+  // Handle POST /v1/projects/:slug/deploy-upload. The request body is a gzipped
+  // tarball of the build context streamed directly to disk (never buffered) with
+  // a hard MAX_UPLOAD_BYTES guard (413 on overflow). Secure-by-default ladder,
+  // identical in spirit to the local-path /deploy handler:
+  //   (1) guardMutation  -> 401 if no valid API key / bearer token
+  //   (2) getProjectBySlug -> 404 if unknown (after the guard, so an
+  //       unauthenticated caller cannot probe project existence)
+  //   (3) authorizeProject -> 401/403 ownership ladder
+  // Then stream -> extract (path-traversal + symlink audit) -> build. The temp
+  // upload dir is ALWAYS removed in extractAndBuild's finally.
+  async function handleDeployUpload(
+    req: IncomingMessage,
+    res: ServerResponse,
+    input: {
+      slug: string;
+      appSubpath: string | null;
+      containerPort: string | null;
+    },
+  ): Promise<void> {
+    // Reject helper for the pre-stream checks (auth/ownership/validation). We
+    // must NOT destroy the request before responding — doing so resets the
+    // connection and the client sees a "socket hang up" instead of our JSON.
+    // Instead we DRAIN the incoming body (resume + discard) so the request
+    // completes cleanly, then send the JSON response. The client may still be
+    // uploading; draining lets the socket finish without buffering anything.
+    const reject = (status: number, body: unknown) => {
+      req.on("error", () => {
+        // ignore: client may abort once it sees the response
+      });
+      req.resume(); // discard any (further) request body
+      sendJson(res, status, body);
+    };
+
+    // (1) Credentials.
+    if (!(await guardMutation(req.headers))) {
+      return reject(401, unauthorized().body);
+    }
+
+    // Validate appSubpath (query param) with the SAME whitelist as /deploy.
+    let appSubpath: string | undefined;
+    if (input.appSubpath !== null && input.appSubpath !== "") {
+      const subpath = input.appSubpath;
+      const safe =
+        subpath.length > 0 &&
+        !subpath.startsWith("/") &&
+        /^[A-Za-z0-9._/-]+$/.test(subpath) &&
+        !subpath.split("/").some((seg) => seg === "..");
+      if (!safe) {
+        return reject(
+          400,
+          fail(
+            "E_BAD_ARGS",
+            "invalid appSubpath",
+            "appSubpath must be a safe relative path with no .. segments",
+          ),
+        );
+      }
+      appSubpath = subpath;
+    }
+
+    // Container port: default 3000, must be a positive integer.
+    let containerPort = 3000;
+    if (input.containerPort !== null) {
+      const n = Number(input.containerPort);
+      if (!Number.isInteger(n) || n < 1 || !/^\d+$/.test(input.containerPort)) {
+        return reject(
+          400,
+          fail(
+            "E_BAD_ARGS",
+            "containerPort must be a positive integer",
+            "?containerPort=3000",
+          ),
+        );
+      }
+      containerPort = n;
+    }
+
+    // (2) Resolve project (after the guard).
+    const project = await store.getProjectBySlug(input.slug);
+    if (!project) {
+      return reject(
+        404,
+        fail("E_NOT_FOUND", "unknown project: " + input.slug),
+      );
+    }
+
+    // (3) Ownership.
+    const access = await authorizeProject(req.headers, project);
+    if (access === "unauth") return reject(401, unauthorized().body);
+    if (access === "forbidden") return reject(403, forbidden().body);
+
+    // Create a fresh per-upload directory under the (projectId-scoped) builds
+    // root. mkdtemp guarantees a unique name so concurrent uploads never collide.
+    let extractParent: string;
+    let tarPath: string;
+    try {
+      const projectRoot = join(uploadsRoot, project.id);
+      mkdirSync(projectRoot, { recursive: true });
+      extractParent = mkdtempSync(join(projectRoot, "upload-"));
+      tarPath = join(extractParent, "upload.tar.gz");
+    } catch {
+      return reject(
+        500,
+        fail("E_UNKNOWN", "could not prepare the upload directory"),
+      );
+    }
+
+    // Stream the body to disk with the bounded size guard. On overflow we emit a
+    // 413 and clean up the (now-orphaned) upload dir.
+    try {
+      await streamUploadToFile(req, tarPath, MAX_UPLOAD_BYTES);
+    } catch (err) {
+      try {
+        rmSync(extractParent, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+      const code =
+        err && typeof err === "object" && "code" in err
+          ? (err as { code?: unknown }).code
+          : undefined;
+      if (code === "E_PAYLOAD_TOO_LARGE") {
+        return reject(
+          413,
+          fail(
+            "E_PAYLOAD_TOO_LARGE",
+            "upload exceeds the maximum allowed size",
+            "exclude node_modules/.git/.podkit/dist, or split the upload",
+          ),
+        );
+      }
+      return reject(400, fail("E_BAD_ARGS", "upload failed"));
+    }
+
+    // Extract (with traversal/symlink audit) and build. extractAndBuild ALWAYS
+    // cleans up extractParent in its finally.
+    let result: DeployResult;
+    try {
+      result = await extractAndBuild({
+        tarPath,
+        extractParent,
+        slug: input.slug,
+        projectId: project.id,
+        containerPort,
+        appSubpath,
+      });
+    } catch {
+      // Defensive: extractAndBuild already cleans up, but guard against an
+      // unexpected throw so we never leak the temp dir or a stack trace.
+      try {
+        rmSync(extractParent, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+      return sendJson(res, 500, fail("E_UNKNOWN", "internal server error"));
+    }
+
+    if ("error" in result) {
+      return sendJson(
+        res,
+        result.error.status,
+        fail(result.error.code, result.error.message, result.error.hint),
+      );
+    }
+    return sendJson(
+      res,
+      200,
+      ok({
+        version: result.version,
+        hostPort: result.hostPort,
+        url: gatewayUrl + "/_p/" + input.slug + "/",
+      }),
+    );
+  }
+
   const server = createServer(
     async (req: IncomingMessage, res: ServerResponse) => {
       // CORS: the cloud console is a separate origin from the control-plane.
@@ -2107,6 +2567,24 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           // Asset not found (has an extension).
           res.statusCode = 404;
           res.end("Not Found");
+          return;
+        }
+
+        // Upload-based deploy is handled OUTSIDE the JSON router because the body
+        // is a (potentially large) gzipped tarball, not JSON: it must NOT go
+        // through readJson (1 MiB cap + full in-memory buffering). We stream it
+        // straight to disk with a bounded size guard, extract it safely, and
+        // build from the extracted dir. Matched by method + path shape.
+        const uploadMatch =
+          method === "POST"
+            ? /^\/v1\/projects\/([^/]+)\/deploy-upload$/.exec(url.pathname)
+            : null;
+        if (uploadMatch) {
+          await handleDeployUpload(req, res, {
+            slug: decodeURIComponent(uploadMatch[1]!),
+            appSubpath: url.searchParams.get("appSubpath"),
+            containerPort: url.searchParams.get("containerPort"),
+          });
           return;
         }
 
