@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { api, getApiUrl, setApiUrl, getToken, clearToken } from "./api/client.ts";
 import type { Account } from "./api/client.ts";
 import { useApi } from "./lib/useApi.ts";
@@ -6,21 +7,30 @@ import { Projects } from "./pages/Projects.tsx";
 import { Project } from "./pages/Project.tsx";
 import { Login } from "./pages/Login.tsx";
 import { CliAuthorize } from "./pages/CliAuthorize.tsx";
+import { Landing } from "./pages/Landing.tsx";
+import { Docs } from "./pages/Docs.tsx";
 
 type Route =
-  | { page: "projects" }
+  | { page: "landing" }
+  | { page: "docs" }
+  | { page: "login" }
+  | { page: "dashboard" }
   | { page: "project"; slug: string }
   | { page: "cli" };
+
+// Which routes require a signed-in account. Public routes render for everyone.
+const GATED: ReadonlyArray<Route["page"]> = ["dashboard", "project", "cli"];
 
 function parseHash(): Route {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [path] = raw.split("?");
-  if (path === "cli") {
-    return { page: "cli" };
-  }
+  if (path === "docs") return { page: "docs" };
+  if (path === "login") return { page: "login" };
+  if (path === "dashboard") return { page: "dashboard" };
+  if (path === "cli") return { page: "cli" };
   const m = path.match(/^p\/(.+)$/);
   if (m) return { page: "project", slug: decodeURIComponent(m[1]) };
-  return { page: "projects" };
+  return { page: "landing" };
 }
 
 function useRoute(): Route {
@@ -35,6 +45,7 @@ function useRoute(): Route {
 }
 
 export function App() {
+  const route = useRoute();
   const [authed, setAuthed] = useState(getToken() !== "");
   const [account, setAccount] = useState<Account | null>(null);
   const [checking, setChecking] = useState(getToken() !== "");
@@ -55,7 +66,7 @@ export function App() {
         setAccount(res.data.account);
         setChecking(false);
       } else {
-        // 401 (or any auth failure): drop the token and fall back to Login.
+        // 401 (or any auth failure): drop the token and fall back to logged-out.
         clearToken();
         setAccount(null);
         setAuthed(false);
@@ -65,8 +76,28 @@ export function App() {
     return () => { alive = false; };
   }, [authed]);
 
-  if (!authed) return <Login onAuthed={reload} />;
+  const gated = GATED.includes(route.page);
 
+  // Public pages render for everyone — including while a token is being verified.
+  if (route.page === "landing") {
+    return <Shell account={authed ? account : null}><Landing /></Shell>;
+  }
+  if (route.page === "docs") {
+    return <Shell account={authed ? account : null}><Docs /></Shell>;
+  }
+
+  // Already signed in but on the sign-in route: send them to the dashboard.
+  if (route.page === "login" && authed) {
+    location.hash = "#/dashboard";
+    return null;
+  }
+
+  // The explicit sign-in route, and the fallback for gated pages while logged out.
+  if (route.page === "login" || (gated && !authed)) {
+    return <Login onAuthed={() => { reload(); location.hash = "#/dashboard"; }} />;
+  }
+
+  // Gated pages, signed in: wait for the me() check before rendering the console.
   if (checking) {
     return (
       <div className="app">
@@ -77,11 +108,50 @@ export function App() {
     );
   }
 
-  return <Console account={account} onSignOut={() => { clearToken(); reload(); }} />;
+  return <Console route={route} account={account} onSignOut={() => { clearToken(); reload(); location.hash = "#/"; }} />;
 }
 
-function Console({ account, onSignOut }: { account: Account | null; onSignOut: () => void }) {
+// Lighter public chrome for landing + docs: brand, Docs, and a sign-in / dashboard
+// affordance. No health pill, no Connect — those belong on the app surface.
+function PublicNav({ account }: { account: Account | null }) {
   const route = useRoute();
+  return (
+    <header className="topnav topnav-public">
+      <a className="brand" href="#/">
+        <span className="logo" aria-hidden>
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5 16.5 15h-15L9 1.5Z" fill="currentColor" /></svg>
+        </span>
+        podkit
+      </a>
+      <span className="spacer" />
+      <nav className="nav-links">
+        <a className={"nav-link" + (route.page === "docs" ? " active" : "")} href="#/docs">Docs</a>
+        {account ? (
+          <>
+            <a className="nav-link" href="#/dashboard">Dashboard</a>
+            <span className="muted mono nav-email">{account.email}</span>
+          </>
+        ) : (
+          <>
+            <a className="nav-link" href="#/login">Sign in</a>
+            <a className="btn btn-sm btn-invert" href="#/login">Get started</a>
+          </>
+        )}
+      </nav>
+    </header>
+  );
+}
+
+function Shell({ account, children }: { account: Account | null; children: ReactNode }) {
+  return (
+    <div className="app">
+      <PublicNav account={account} />
+      {children}
+    </div>
+  );
+}
+
+function Console({ route, account, onSignOut }: { route: Route; account: Account | null; onSignOut: () => void }) {
   const health = useApi(() => api.health(), []);
   const connected = health.data?.status === "ok";
 
@@ -96,7 +166,7 @@ function Console({ account, onSignOut }: { account: Account | null; onSignOut: (
         </a>
         <span className="crumb-sep">/</span>
         <nav className="crumb muted">
-          <a href="#/">cloud</a>
+          <a href="#/dashboard">cloud</a>
           {route.page === "project" && (
             <>
               <span className="crumb-sep">/</span>
@@ -111,6 +181,7 @@ function Console({ account, onSignOut }: { account: Account | null; onSignOut: (
           )}
         </nav>
         <span className="spacer" />
+        <a className="nav-link" href="#/docs">Docs</a>
         <span className={"status " + (health.loading ? "status-none" : connected ? "status-ready" : "status-error")}>
           <span className="dot" />
           {health.loading ? "connecting" : connected ? "control-plane" : "offline"}
