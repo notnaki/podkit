@@ -67,6 +67,10 @@ export type CreateCloudOptions = {
   // Vendored base image standalone app builds build FROM. Defaults to
   // PODKIT_BASE_IMAGE env, then the runtime's DEFAULT_BASE_IMAGE.
   baseImage?: string;
+  // Abuse caps (default from env, else permissive). maxProjectsPerAccount 0 =
+  // unlimited; rateLimitPerMin <=0 disables API rate limiting.
+  maxProjectsPerAccount?: number;
+  rateLimitPerMin?: number;
 };
 
 export type Cloud = {
@@ -757,6 +761,33 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     return true;
   }
 
+  // General API rate limiter (fixed window, per credential or IP). A baseline
+  // abuse defense for a public control-plane. PODKIT_RATE_LIMIT_PER_MIN<=0
+  // disables it; the default is generous so normal CLI/console use is unaffected.
+  const RATE_LIMIT_PER_MIN =
+    opts.rateLimitPerMin ?? Number(process.env.PODKIT_RATE_LIMIT_PER_MIN ?? "600");
+  const apiRate = new Map<string, { count: number; windowStart: number }>();
+  function checkApiRateLimit(key: string): boolean {
+    if (!Number.isFinite(RATE_LIMIT_PER_MIN) || RATE_LIMIT_PER_MIN <= 0) {
+      return true;
+    }
+    const now = Date.now();
+    const rec = apiRate.get(key);
+    if (!rec || now - rec.windowStart >= 60000) {
+      apiRate.set(key, { count: 1, windowStart: now });
+      return true;
+    }
+    if (rec.count >= RATE_LIMIT_PER_MIN) return false;
+    rec.count++;
+    return true;
+  }
+
+  // Max projects an account may own (0 = unlimited). Caps resource abuse when
+  // the control-plane is exposed publicly. The machine API key is exempt.
+  const MAX_PROJECTS_PER_ACCOUNT =
+    opts.maxProjectsPerAccount ??
+    Number(process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT ?? "0");
+
   // Shared build+run+record+route pipeline for both production deploys and
   // branch previews. The caller is responsible for credential/ownership checks
   // and for validating/resolving contextDir BEFORE calling this. Production uses
@@ -1070,6 +1101,21 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     // The machine API key has no account, so it may assign an owner explicitly.
     const creator = await accountFromAuth(headers);
     const owner = creator ? creator.accountId : b.owner ?? "";
+    // Per-account project quota (machine API key is exempt). 0 = unlimited.
+    if (creator && MAX_PROJECTS_PER_ACCOUNT > 0) {
+      const all = await store.listProjects();
+      const mine = all.filter((p) => p.owner === creator.accountId).length;
+      if (mine >= MAX_PROJECTS_PER_ACCOUNT) {
+        return {
+          status: 403,
+          body: fail(
+            "E_QUOTA",
+            "project limit reached (" + MAX_PROJECTS_PER_ACCOUNT + ")",
+            "delete an unused project, or ask the operator to raise the limit",
+          ),
+        };
+      }
+    }
     const project = await store.createProject({
       slug: b.slug,
       owner,
@@ -2862,6 +2908,27 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           res.statusCode = 404;
           res.end("Not Found");
           return;
+        }
+
+        // Rate limit the API surface (not the console static assets above, nor
+        // the gateway which is a separate server). Keyed by the presented
+        // credential, falling back to the client IP for unauthenticated calls.
+        if (url.pathname.startsWith("/v1/")) {
+          const authH = req.headers["authorization"];
+          const keyH = req.headers["x-podkit-key"];
+          const rlKey =
+            (Array.isArray(authH) ? authH[0] : authH) ||
+            (Array.isArray(keyH) ? keyH[0] : keyH) ||
+            req.socket.remoteAddress ||
+            "anon";
+          if (!checkApiRateLimit(rlKey)) {
+            sendJson(
+              res,
+              429,
+              fail("E_RATE_LIMITED", "rate limit exceeded, slow down"),
+            );
+            return;
+          }
         }
 
         // Upload-based deploy is handled OUTSIDE the JSON router because the body
