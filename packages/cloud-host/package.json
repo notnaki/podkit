@@ -10,6 +10,7 @@
     "@podkit/db-provision": "workspace:*",
     "@podkit/cloud": "workspace:*",
     "@podkit/auth": "workspace:*",
+    "@podkit/telemetry": "workspace:*",
     "pg": "^8.13.0"
   },
   "devDependencies": {

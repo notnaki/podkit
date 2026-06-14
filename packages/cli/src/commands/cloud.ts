@@ -51,6 +51,15 @@ async function callControlPlane(
   return (await response.json()) as Envelope<unknown>;
 }
 
+type Spawn = typeof spawn;
+
+// Injectable for testing; defaults to node:child_process spawn.
+let spawnImpl: Spawn = spawn;
+
+export function __setSpawnForTest(impl: Spawn | null): void {
+  spawnImpl = impl ?? spawn;
+}
+
 function openInBrowser(url: string): void {
   const command =
     process.platform === "darwin"
@@ -59,7 +68,7 @@ function openInBrowser(url: string): void {
         ? "start"
         : "xdg-open";
   try {
-    const child = spawn(command, [url], {
+    const child = spawnImpl(command, [url], {
       stdio: "ignore",
       detached: true,
       shell: process.platform === "win32",
@@ -71,6 +80,25 @@ function openInBrowser(url: string): void {
   } catch {
     // ignore; the URL is printed anyway
   }
+}
+
+// Pure string padding: build an aligned, dashed-rule table from row objects.
+// Columns are derived from the first row's keys; widths via Math.max over
+// header + cell lengths. No eval, no execution.
+export function formatTable(rows: Record<string, string>[]): string {
+  if (rows.length === 0) return "";
+  const columns = Object.keys(rows[0]);
+  const widths = columns.map((col) =>
+    Math.max(col.length, ...rows.map((row) => (row[col] ?? "").length)),
+  );
+  const pad = (value: string, width: number): string =>
+    value + " ".repeat(width - value.length);
+  const header = columns.map((col, i) => pad(col, widths[i])).join(" | ");
+  const rule = widths.map((width) => "-".repeat(width)).join("-+-");
+  const body = rows.map((row) =>
+    columns.map((col, i) => pad(row[col] ?? "", widths[i])).join(" | "),
+  );
+  return [header, rule, ...body].join("\n");
 }
 
 type StartResponse = {
@@ -86,7 +114,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -282,11 +310,27 @@ async function login(rest: string[]): Promise<Envelope<unknown>> {
 }
 
 export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
-  const [subcommand, ...rest] = args;
+  const [subcommand, ...args1] = args;
+  const wantsTable = args1.includes("--table");
+  const rest = args1.filter((arg) => arg !== "--table");
 
   try {
-    if (subcommand === "projects") {
-      return await callControlPlane("GET", "/v1/projects");
+    if (subcommand === "projects" || subcommand === "list") {
+      const res = await callControlPlane("GET", "/v1/projects");
+      if (wantsTable && res.ok) {
+        const data = res.data as any;
+        const list = Array.isArray(data?.projects)
+          ? data.projects
+          : Array.isArray(data)
+            ? data
+            : [];
+        const rows: Record<string, string>[] = list.map((p: any) => ({
+          slug: String(p?.slug ?? ""),
+          url: String(p?.url ?? ""),
+        }));
+        return ok(formatTable(rows));
+      }
+      return res;
     }
 
     if (subcommand === "create") {
@@ -323,6 +367,28 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
         );
       }
       return await callControlPlane("GET", `/v1/projects/${slug}`);
+    }
+
+    if (subcommand === "open") {
+      const [slug] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "open requires a slug", AVAILABLE),
+        );
+      }
+      const proj = await callControlPlane(
+        "GET",
+        `/v1/projects/${encodeURIComponent(slug)}`,
+      );
+      if (!proj.ok) return proj;
+      const url = (proj.data as any)?.url;
+      if (!url) {
+        return fail(
+          new PodkitError("E_BAD_STATE", "project has no URL", "deploy first"),
+        );
+      }
+      openInBrowser(url);
+      return ok({ status: "opened", url });
     }
 
     if (subcommand === "deployments") {
@@ -410,23 +476,38 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
           : null;
       const ed = env.ok ? (env.data as any) : null;
       const od = domains.ok ? (domains.data as any) : null;
+      const latestDeployment =
+        deployments && deployments.length > 0
+          ? deployments[deployments.length - 1]
+          : null;
+      const envCount = Array.isArray(ed?.env)
+        ? ed.env.length
+        : Array.isArray(ed)
+          ? ed.length
+          : 0;
+      const domainCount = Array.isArray(od?.domains)
+        ? od.domains.length
+        : Array.isArray(od)
+          ? od.length
+          : 0;
+      if (wantsTable) {
+        const rows: Record<string, string>[] = [
+          {
+            slug,
+            url: String(pd?.url ?? ""),
+            version: String(latestDeployment?.version ?? latestDeployment?.id ?? ""),
+            env: String(envCount),
+            domains: String(domainCount),
+          },
+        ];
+        return ok(formatTable(rows));
+      }
       return ok({
         slug,
         url: pd?.url ?? null,
-        latestDeployment:
-          deployments && deployments.length > 0
-            ? deployments[deployments.length - 1]
-            : null,
-        envCount: Array.isArray(ed?.env)
-          ? ed.env.length
-          : Array.isArray(ed)
-            ? ed.length
-            : 0,
-        domainCount: Array.isArray(od?.domains)
-          ? od.domains.length
-          : Array.isArray(od)
-            ? od.length
-            : 0,
+        latestDeployment,
+        envCount,
+        domainCount,
       });
     }
 

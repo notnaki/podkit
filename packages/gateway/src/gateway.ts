@@ -8,7 +8,16 @@ import {
 export type Resolver = (req: {
   host: string;
   path: string;
-}) => { hostPort: number } | null;
+}) => { hostPort: number; slug?: string | null } | null;
+
+// Observability hook invoked once per request with non-sensitive metadata only:
+// the resolved project slug (or null), the response status class, and the
+// latency. Bodies, headers, and paths are never passed here.
+export type RequestObserver = (m: {
+  slug: string | null;
+  statusCode: number;
+  latencyMs: number;
+}) => void;
 
 function fail(res: ServerResponse, status: number, code: string, message: string): void {
   const body = JSON.stringify({ ok: false, error: { code, message } });
@@ -25,18 +34,29 @@ function stripPathPrefix(path: string): string {
   return rest && rest.length > 0 ? rest : "/";
 }
 
-export function createGateway(opts: { resolve: Resolver }): {
+export function createGateway(opts: {
+  resolve: Resolver;
+  onRequest?: RequestObserver;
+}): {
   listen(port: number): Promise<{ url: string }>;
   close(): Promise<void>;
 } {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const host = req.headers.host ?? "";
     const path = req.url ?? "/";
+    const requestStart = Date.now();
     const route = opts.resolve({ host, path });
     if (!route) {
+      // No route resolved: we still couldn't determine a slug, so report null.
+      opts.onRequest?.({
+        slug: null,
+        statusCode: 502,
+        latencyMs: Date.now() - requestStart,
+      });
       fail(res, 502, "E_NO_ROUTE", "No route for host=" + host + " path=" + path);
       return;
     }
+    const slug = route.slug ?? null;
 
     const strippedPath = stripPathPrefix(path);
     const upstream = httpRequest(
@@ -48,11 +68,21 @@ export function createGateway(opts: { resolve: Resolver }): {
         headers: req.headers,
       },
       (upRes: IncomingMessage) => {
+        opts.onRequest?.({
+          slug,
+          statusCode: upRes.statusCode ?? 502,
+          latencyMs: Date.now() - requestStart,
+        });
         res.writeHead(upRes.statusCode ?? 502, upRes.headers);
         upRes.pipe(res);
       },
     );
     upstream.on("error", (err: Error) => {
+      opts.onRequest?.({
+        slug,
+        statusCode: 502,
+        latencyMs: Date.now() - requestStart,
+      });
       if (!res.headersSent) {
         fail(res, 502, "E_UPSTREAM", "Upstream request failed: " + err.message);
       } else {

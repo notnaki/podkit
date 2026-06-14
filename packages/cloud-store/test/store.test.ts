@@ -100,6 +100,12 @@ describe("cloud-store", () => {
       const missing = await store.getProjectBySlug("does-not-exist");
       expect(missing).toBeNull();
 
+      // Scoped DB URL: unset by default, then round-trips through set/get.
+      expect(await store.getProjectDbUrl(created.id)).toBeNull();
+      const scopedUrl = "postgres://proj_x_app:secret@localhost:5432/proj_x";
+      await store.setProjectDbUrl(created.id, scopedUrl);
+      expect(await store.getProjectDbUrl(created.id)).toBe(scopedUrl);
+
       const dep = await store.recordDeployment({
         projectId: created.id,
         version: "1.0.0",
