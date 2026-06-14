@@ -56,16 +56,17 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Hardening batch 4** (PR #25): (1) **device-flow** — `userCode` entropy 32→128 bits; in-memory rate-limit on `/v1/auth/cli/approve` (10/60s per account → 429). (2) **non-root tenant images** — buildpack-generated Dockerfile drops to `USER node` (control-plane left root: needs docker-socket access).
 - **Product wave 2** (PR #26, secure-by-default): (1) **request metrics** — gateway records per-project `{requests, status buckets, avgLatency, lastSeen}`; ownership-gated `GET /v1/projects/:slug/metrics`. (2) **log `?limit`/`?since`**. (3) **CLI** `podkit cloud open <slug>` + `--table` output. (4) **read-only SQL runner** `POST /v1/projects/:slug/db/query` — ownership-gated, SELECT-only, statement-timeout + LIMIT, parameterized, runs as the **scoped non-superuser role**; scoped DB connection string now **stored encrypted at rest** (reused, no per-query rotation).
 - **Console UI** (PR #27): surfaces #26 in the cloud-console — **Metrics tab**, **Database tab** (read-only SQL console), **log filters** (lines/since), and copy-to-clipboard for URLs + connection string.
+- **Production app bundling** (PR #28): tenant containers no longer run the Vite dev server. `@podkit/framework` `buildApp()` (Vite client build w/ hashed assets + Vite SSR build of route modules + manifest) and a **Vite-free** `createProdServer()` (imports pre-compiled SSR modules, serves immutable-cached client assets). CLI `podkit build`/`start`; buildpack Dockerfile now `RUN`s build + `CMD`s `start`. (Edge/cold-start optimization still open.)
 
 ## 📋 To do — cloud hardening (toward production)
 
 1. **Secret-injection redesign** — env is encrypted at rest (#23) but still injected as plaintext `-e` into containers, and the per-project connection string is returned in the create response; move to a credential-broker / Docker secrets flow. *(Architectural — needs sign-off.)*
 2. **docker.sock host-escape** — the control-plane mounts the host Docker socket; move to a brokered build/run service or orchestrator. *(Architectural — needs sign-off.)* Smaller remaining container hardening: `--read-only` rootfs (+ writable tmpfs), pinned base-image digests, non-root control-plane (needs docker-group gid mapping).
-4. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains.
-5. **Standalone buildpack** — support apps outside the monorepo (published packages).
-6. **Prod app bundling** — containers run the dev server; add an optimized production build/runtime, cold-start, edge.
-7. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources.
-8. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
+3. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains. *(Needs public DNS/reachability — hard to test locally.)*
+4. **Standalone buildpack** — support apps outside the monorepo (published packages).
+5. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources.
+6. **Cold-start / edge** — prod bundling shipped (#28); next is faster container cold-start + edge runtime.
+7. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
 
