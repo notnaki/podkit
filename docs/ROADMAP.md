@@ -76,7 +76,7 @@ The user intends to release podkit. Triage of what's needed, by audience.
 **Done / ready:** one-click `podkit cloud deploy` (no Dockerfile/flags, zero-downtime), preview deploys per DB branch, managed Postgres + scoped roles + branching, rollback, logs, metrics, env (encrypted at rest), custom domains, ownership enforcement, token expiry+revocation, container hardening (cap-drop/no-new-privileges/non-root tenant/127.0.0.1), CORS allowlist, body/upload caps, secrets-at-rest, production compose + `docs/DEPLOY.md`, public landing + `/docs` site, 316+ tests.
 
 **Blocking a SELF-HOST / early release (do next):**
-- [ ] `podkit init` scaffolding (new-app template) + a polished getting-started in `/docs` and README.
+- [x] `podkit init` scaffolding (new-app template) — DONE (PR #40); `/docs` Getting-started points to it. (Polished README/landing copy can still improve.)
 - [ ] TLS: document/standardize the Caddy-in-front path (DEPLOY.md has it); ACME-in-podkit later.
 - [ ] Base-image freshness: rebuild/version `podkit-base` on `@podkit/*` change (operator doc + maybe a `cloud:base:rebuild`).
 - [ ] Account lifecycle: password reset, delete account; basic email verification.
