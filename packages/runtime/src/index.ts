@@ -5,3 +5,9 @@ export type {
   RunContainerOptions,
   RunContainerResult,
 } from "./docker.ts";
+export { isPodkitApp, generatePodkitDockerfile, buildPodkitApp } from "./buildpack.ts";
+export type {
+  GeneratePodkitDockerfileOptions,
+  BuildPodkitAppOptions,
+  BuildPodkitAppResult,
+} from "./buildpack.ts";
