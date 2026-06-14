@@ -7,7 +7,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "cloud:up": "docker compose -f infra/docker-compose.yml up -d --build",
-    "cloud:down": "docker compose -f infra/docker-compose.yml down -v"
+    "cloud:down": "docker compose -f infra/docker-compose.yml down -v",
+    "cloud:prod:up": "docker compose -f infra/docker-compose.prod.yml --env-file infra/.env up -d --build",
+    "cloud:prod:down": "docker compose -f infra/docker-compose.prod.yml down"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
