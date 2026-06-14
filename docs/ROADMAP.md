@@ -59,6 +59,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Production app bundling** (PR #28): tenant containers no longer run the Vite dev server. `@podkit/framework` `buildApp()` (Vite client build w/ hashed assets + Vite SSR build of route modules + manifest) and a **Vite-free** `createProdServer()` (imports pre-compiled SSR modules, serves immutable-cached client assets). CLI `podkit build`/`start`; buildpack Dockerfile now `RUN`s build + `CMD`s `start`. (Edge/cold-start optimization still open.)
 - **Reap superseded containers** (PR #29): deploy/rollback now stops the container it replaced (after the routeMap cutover, so no dropped traffic) instead of leaking it until shutdown.
 - **Database branching** (PR #30, Supabase-class): isolated per-project Postgres branches (copy-on-create via `CREATE DATABASE … WITH TEMPLATE`), each with its own scoped non-superuser role; `project_branches` table; ownership-gated `POST/GET/DELETE /v1/projects/:slug/branches`; `podkit cloud branches`; console Branches panel in the Database tab.
+- **CI flake fix** (PR #31): the dev server gave Vite's HMR websocket a unique random port instead of the fixed 24678, killing the "Port already in use" collision that flaked the suite under parallel load.
 
 ## 📋 To do — cloud hardening (toward production)
 
@@ -68,7 +69,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 4. **Standalone buildpack** — support apps outside the monorepo (published packages).
 5. **Cold-start / edge** — prod bundling shipped (#28); next is faster container cold-start + edge runtime.
 6. **Telemetry-at-scale, self-host packaging (IaC), branch→preview-deploy wiring** (DB branching shipped in #30; wiring a branch to a preview deployment is the next step).
-7. **CI hygiene** — the full Docker suite has an intermittent flake (port-24678 WebSocket collision in the framework dev-server test + teardown races under heavy parallel load); pin/limit vitest concurrency for Docker suites and fix the fixed-port WS.
+7. **CI hygiene** — fixed-port HMR WS collision resolved (#31). Remaining: occasional Docker teardown/port races under heavy parallel load; consider limiting vitest concurrency for the Docker suites.
 
 ---
 
