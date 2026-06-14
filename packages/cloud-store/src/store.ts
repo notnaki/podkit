@@ -38,6 +38,13 @@ export type Store = {
     projectId: string,
   ) => Promise<Array<{ key: string; value: string; sensitive: boolean }>>;
   deleteEnv: (opts: { projectId: string; key: string }) => Promise<void>;
+  addDomain: (opts: { projectId: string; domain: string }) => Promise<void>;
+  listDomains: (projectId: string) => Promise<Array<{ domain: string }>>;
+  deleteDomain: (opts: {
+    projectId: string;
+    domain: string;
+  }) => Promise<void>;
+  listAllDomains: () => Promise<Array<{ domain: string; slug: string }>>;
   createAccount: (input: {
     email: string;
     passwordHash: string;
@@ -103,6 +110,13 @@ export function createStore(opts: CreateStoreOptions): Store {
         value text NOT NULL,
         sensitive boolean NOT NULL DEFAULT false,
         UNIQUE (project_id, key)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_domains (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL,
+        domain text UNIQUE NOT NULL
       )
     `);
     await pool.query(`
@@ -251,6 +265,48 @@ export function createStore(opts: CreateStoreOptions): Store {
     );
   }
 
+  async function addDomain(opts: {
+    projectId: string;
+    domain: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO project_domains (project_id, domain) VALUES ($1, $2)`,
+      [opts.projectId, opts.domain],
+    );
+  }
+
+  async function listDomains(
+    projectId: string,
+  ): Promise<Array<{ domain: string }>> {
+    const result = await pool.query<{ domain: string }>(
+      `SELECT domain FROM project_domains WHERE project_id = $1 ORDER BY domain ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({ domain: r.domain }));
+  }
+
+  async function deleteDomain(opts: {
+    projectId: string;
+    domain: string;
+  }): Promise<void> {
+    await pool.query(
+      `DELETE FROM project_domains WHERE project_id = $1 AND domain = $2`,
+      [opts.projectId, opts.domain],
+    );
+  }
+
+  async function listAllDomains(): Promise<
+    Array<{ domain: string; slug: string }>
+  > {
+    const result = await pool.query<{ domain: string; slug: string }>(
+      `SELECT d.domain AS domain, p.slug AS slug
+       FROM project_domains d
+       JOIN projects p ON p.id = d.project_id
+       ORDER BY d.domain ASC`,
+    );
+    return result.rows.map((r) => ({ domain: r.domain, slug: r.slug }));
+  }
+
   async function createAccount(input: {
     email: string;
     passwordHash: string;
@@ -381,6 +437,10 @@ export function createStore(opts: CreateStoreOptions): Store {
     setEnv,
     listEnv,
     deleteEnv,
+    addDomain,
+    listDomains,
+    deleteDomain,
+    listAllDomains,
     createAccount,
     getAccountByEmail,
     getAccountById,

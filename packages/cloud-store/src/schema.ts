@@ -37,6 +37,12 @@ export const projectEnv = pgTable(
   (t) => [unique().on(t.projectId, t.key)],
 );
 
+export const projectDomains = pgTable("project_domains", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  projectId: uuid("project_id").notNull(),
+  domain: text("domain").unique().notNull(),
+});
+
 export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").unique().notNull(),

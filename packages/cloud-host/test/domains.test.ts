@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { request as httpRequest } from "node:http";
 import { Client } from "pg";
 import { createCloud } from "../src/host.ts";
 import { dropDatabase } from "@podkit/db-provision";
@@ -48,9 +49,40 @@ async function waitForPostgres(connStr: string, attempts = 60): Promise<void> {
   );
 }
 
+// fetch() forbids overriding the Host header, so use a raw node:http request to
+// prove Host-header (custom domain) routing through the gateway.
+function getWithHost(
+  url: string,
+  hostHeader: string,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      {
+        host: u.hostname,
+        port: u.port,
+        method: "GET",
+        path: u.pathname + u.search,
+        headers: { host: hostHeader },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(Buffer.from(c)));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 beforeAll(async () => {
-  // 1. Start the control-plane Postgres.
-  pgContainer = "podkit-cp-" + randomBytes(4).toString("hex");
+  pgContainer = "podkit-cp-dom-" + randomBytes(4).toString("hex");
   await execFileAsync("docker", [
     "run",
     "-d",
@@ -80,8 +112,8 @@ beforeAll(async () => {
 
   await waitForPostgres(connectionString);
 
-  // 2. Build a fixture app context dir.
-  fixtureDir = mkdtempSync(join(tmpdir(), "podkit-app-"));
+  // Build a fixture app context dir with a known response string.
+  fixtureDir = mkdtempSync(join(tmpdir(), "podkit-dom-app-"));
   writeFileSync(
     join(fixtureDir, "Dockerfile"),
     [
@@ -97,15 +129,14 @@ beforeAll(async () => {
     join(fixtureDir, "server.mjs"),
     [
       'import { createServer } from "node:http";',
-      'createServer((_req, res) => {',
+      "createServer((_req, res) => {",
       '  res.writeHead(200, { "content-type": "text/plain" });',
-      '  res.end("hello from demo app");',
+      '  res.end("hello from custom domain app");',
       "}).listen(3000);",
       "",
     ].join("\n"),
   );
 
-  // 3. Bring up the cloud control-plane + gateway.
   cloud = createCloud({
     controlPlaneConnectionString: connectionString,
     adminConnectionString: connectionString,
@@ -127,7 +158,7 @@ afterAll(async () => {
   try {
     await dropDatabase({
       adminConnectionString: connectionString,
-      database: "proj_demo",
+      database: "proj_domdemo",
     });
   } catch {
     // ignore
@@ -139,9 +170,8 @@ afterAll(async () => {
       // ignore
     }
   }
-  // Verify no leftover labeled test containers from THIS suite. Scope to this
-  // suite's own containers (pg + app) so a sibling suite running in parallel
-  // (with its own labeled Postgres) doesn't cause a false failure.
+  // Scope the leftover-container check to this suite's own containers so a
+  // sibling suite running in parallel doesn't cause a false failure.
   const { stdout } = await execFileAsync("docker", [
     "ps",
     "-a",
@@ -154,62 +184,85 @@ afterAll(async () => {
     .trim()
     .split("\n")
     .filter(Boolean)
-    .filter((n) => n === pgContainer || n.startsWith("podkit-app-demo-"));
+    .filter((n) => n === pgContainer || n.startsWith("podkit-app-domdemo-"));
   expect(leftover).toEqual([]);
 }, 120000);
 
-describe("cloud-host full loop (real Docker + Postgres)", () => {
+describe("cloud-host custom domains (real Docker + Postgres)", () => {
   it(
-    "creates a project, deploys an app, and serves it through the gateway",
+    "routes a request by Host header to the deployed app",
     async () => {
-      // 1. Create project -> provisions a managed per-project DB.
+      const domain = "demo.podkit.test";
+
+      // 1. Create project (+ managed DB).
       const createRes = await fetch(apiUrl + "/v1/projects", {
         method: "POST",
         headers: { "content-type": "application/json", "x-podkit-key": "k" },
-        body: JSON.stringify({ slug: "demo", owner: "me" }),
+        body: JSON.stringify({ slug: "domdemo", owner: "me" }),
       });
-      const createBody = await createRes.json();
-      expect(createBody.ok).toBe(true);
-      expect(typeof createBody.data.connectionString).toBe("string");
+      expect((await createRes.json()).ok).toBe(true);
 
-      // Prove the managed per-project DB actually works.
-      const projClient = new Client({
-        connectionString: createBody.data.connectionString,
-      });
-      await projClient.connect();
-      const sel = await projClient.query("SELECT 1 AS one");
-      expect(sel.rows[0].one).toBe(1);
-      await projClient.end();
-
-      // 2. Deploy the app (builds + runs the container).
-      const deployRes = await fetch(apiUrl + "/v1/projects/demo/deploy", {
+      // 2. Deploy the fixture app.
+      const deployRes = await fetch(apiUrl + "/v1/projects/domdemo/deploy", {
         method: "POST",
         headers: { "content-type": "application/json", "x-podkit-key": "k" },
         body: JSON.stringify({ contextDir: fixtureDir, containerPort: 3000 }),
       });
-      const deployBody = await deployRes.json();
-      expect(deployBody.ok).toBe(true);
-      expect(typeof deployBody.data.url).toBe("string");
+      expect((await deployRes.json()).ok).toBe(true);
 
-      // 3. Poll the public gateway URL until the app responds.
+      // 3. Unauthenticated POST domain -> 401.
+      const unauthRes = await fetch(apiUrl + "/v1/projects/domdemo/domains", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ domain }),
+      });
+      expect(unauthRes.status).toBe(401);
+      expect((await unauthRes.json()).error.code).toBe("E_UNAUTHORIZED");
+
+      // 4. Invalid domain -> 400 E_BAD_ARGS.
+      const badRes = await fetch(apiUrl + "/v1/projects/domdemo/domains", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ domain: "no-dot" }),
+      });
+      expect(badRes.status).toBe(400);
+      expect((await badRes.json()).error.code).toBe("E_BAD_ARGS");
+
+      // 5. Add the domain.
+      const addRes = await fetch(apiUrl + "/v1/projects/domdemo/domains", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ domain }),
+      });
+      const addBody = await addRes.json();
+      expect(addBody.ok).toBe(true);
+      expect(addBody.data.domain).toBe(domain);
+
+      // 6. GET lists it.
+      const listRes = await fetch(apiUrl + "/v1/projects/domdemo/domains", {
+        headers: { "x-podkit-key": "k" },
+      });
+      const listBody = await listRes.json();
+      expect(listBody.ok).toBe(true);
+      expect(listBody.data.domains).toEqual([{ domain }]);
+
+      // 7. Raw request to the gateway with Host = custom domain -> app response.
       let served = "";
       let lastErr: unknown = null;
       for (let i = 0; i < 30; i++) {
         try {
-          const res = await fetch(gatewayUrl + "/_p/demo/");
-          const text = await res.text();
-          if (text.includes("hello from demo app")) {
-            served = text;
+          const res = await getWithHost(gatewayUrl + "/", domain);
+          if (res.body.includes("hello from custom domain app")) {
+            served = res.body;
             break;
           }
-          lastErr = "got body: " + text;
+          lastErr = "status=" + res.status + " body=" + res.body;
         } catch (err) {
           lastErr = err;
         }
         await sleep(1000);
       }
-      if (!served.includes("hello from demo app")) {
-        // Capture container logs to aid environmental debugging.
+      if (!served.includes("hello from custom domain app")) {
         let logs = "";
         try {
           const { stdout } = await execFileAsync("docker", [
@@ -229,24 +282,35 @@ describe("cloud-host full loop (real Docker + Postgres)", () => {
           // ignore
         }
         throw new Error(
-          "gateway never served the app. last=" +
+          "gateway never served the app via Host header. last=" +
             String(lastErr) +
             logs,
         );
       }
-      expect(served).toContain("hello from demo app");
+      expect(served).toContain("hello from custom domain app");
 
-      // 4. Deploy without the API key -> 401 E_UNAUTHORIZED.
-      const unauthRes = await fetch(apiUrl + "/v1/projects/demo/deploy", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ contextDir: fixtureDir, containerPort: 3000 }),
+      // 8. DELETE removes the domain (route + map).
+      const delRes = await fetch(
+        apiUrl + "/v1/projects/domdemo/domains/" + domain,
+        {
+          method: "DELETE",
+          headers: { "x-podkit-key": "k" },
+        },
+      );
+      const delBody = await delRes.json();
+      expect(delBody.ok).toBe(true);
+      expect(delBody.data.deleted).toBe(domain);
+
+      // After deletion the Host route no longer resolves -> 502 E_NO_ROUTE.
+      const afterDel = await getWithHost(gatewayUrl + "/", domain);
+      expect(afterDel.status).toBe(502);
+
+      // And GET no longer lists it.
+      const listRes2 = await fetch(apiUrl + "/v1/projects/domdemo/domains", {
+        headers: { "x-podkit-key": "k" },
       });
-      expect(unauthRes.status).toBe(401);
-      const unauthBody = await unauthRes.json();
-      expect(unauthBody.ok).toBe(false);
-      expect(unauthBody.error.code).toBe("E_UNAUTHORIZED");
+      expect((await listRes2.json()).data.domains).toEqual([]);
     },
-    120000,
+    180000,
   );
 });

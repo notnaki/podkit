@@ -5,6 +5,7 @@ export {
   projects,
   deployments,
   projectEnv,
+  projectDomains,
   accounts,
   cliSessions,
 } from "./schema.ts";
