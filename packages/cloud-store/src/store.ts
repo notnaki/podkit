@@ -44,7 +44,13 @@ export type Store = {
   }) => Promise<{ id: string }>;
   getCliSessionByDeviceCode: (
     deviceCode: string,
-  ) => Promise<{ id: string; status: string; token: string | null } | null>;
+  ) => Promise<{
+    id: string;
+    status: string;
+    token: string | null;
+    expiresAt: string | null;
+    expired: boolean;
+  } | null>;
   getCliSessionByUserCode: (
     userCode: string,
   ) => Promise<{ id: string; status: string } | null>;
@@ -52,7 +58,7 @@ export type Store = {
     userCode: string;
     accountId: string;
     token: string;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   close: () => Promise<void>;
 };
 
@@ -95,8 +101,12 @@ export function createStore(opts: CreateStoreOptions): Store {
         status text NOT NULL,
         account_id uuid,
         token text,
+        expires_at timestamptz,
         created_at timestamp DEFAULT now()
       )
+    `);
+    await pool.query(`
+      ALTER TABLE cli_auth_sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz
     `);
   }
 
@@ -229,8 +239,8 @@ export function createStore(opts: CreateStoreOptions): Store {
     userCode: string;
   }): Promise<{ id: string }> {
     const result = await pool.query<{ id: string }>(
-      `INSERT INTO cli_auth_sessions (device_code, user_code, status)
-       VALUES ($1, $2, 'pending') RETURNING id`,
+      `INSERT INTO cli_auth_sessions (device_code, user_code, status, expires_at)
+       VALUES ($1, $2, 'pending', now() + interval '10 minutes') RETURNING id`,
       [input.deviceCode, input.userCode],
     );
     return { id: result.rows[0].id };
@@ -238,18 +248,33 @@ export function createStore(opts: CreateStoreOptions): Store {
 
   async function getCliSessionByDeviceCode(
     deviceCode: string,
-  ): Promise<{ id: string; status: string; token: string | null } | null> {
+  ): Promise<{
+    id: string;
+    status: string;
+    token: string | null;
+    expiresAt: string | null;
+    expired: boolean;
+  } | null> {
     const result = await pool.query<{
       id: string;
       status: string;
       token: string | null;
+      expires_at: Date | null;
+      expired: boolean;
     }>(
-      `SELECT id, status, token FROM cli_auth_sessions WHERE device_code = $1 LIMIT 1`,
+      `SELECT id, status, token, expires_at, (expires_at < now()) AS expired
+       FROM cli_auth_sessions WHERE device_code = $1 LIMIT 1`,
       [deviceCode],
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { id: row.id, status: row.status, token: row.token ?? null };
+    return {
+      id: row.id,
+      status: row.status,
+      token: row.token ?? null,
+      expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
+      expired: row.expired ?? false,
+    };
   }
 
   async function getCliSessionByUserCode(
@@ -268,13 +293,14 @@ export function createStore(opts: CreateStoreOptions): Store {
     userCode: string;
     accountId: string;
     token: string;
-  }): Promise<void> {
-    await pool.query(
+  }): Promise<boolean> {
+    const result = await pool.query(
       `UPDATE cli_auth_sessions
        SET status = 'approved', account_id = $1, token = $2
-       WHERE user_code = $3 AND status = 'pending'`,
+       WHERE user_code = $3 AND status = 'pending' AND expires_at > now()`,
       [input.accountId, input.token, input.userCode],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async function close(): Promise<void> {

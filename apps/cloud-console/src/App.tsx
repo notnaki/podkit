@@ -10,14 +10,13 @@ import { CliAuthorize } from "./pages/CliAuthorize.tsx";
 type Route =
   | { page: "projects" }
   | { page: "project"; slug: string }
-  | { page: "cli"; code: string };
+  | { page: "cli" };
 
 function parseHash(): Route {
   const raw = window.location.hash.replace(/^#\/?/, "");
-  const [path, query] = raw.split("?");
+  const [path] = raw.split("?");
   if (path === "cli") {
-    const code = new URLSearchParams(query ?? "").get("code") ?? "";
-    return { page: "cli", code };
+    return { page: "cli" };
   }
   const m = path.match(/^p\/(.+)$/);
   if (m) return { page: "project", slug: decodeURIComponent(m[1]) };
@@ -122,7 +121,7 @@ function Console({ account, onSignOut }: { account: Account | null; onSignOut: (
       </header>
 
       {route.page === "cli" ? (
-        <CliAuthorize code={route.code} />
+        <CliAuthorize />
       ) : route.page === "project" ? (
         <Project slug={route.slug} />
       ) : (

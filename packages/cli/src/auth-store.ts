@@ -21,8 +21,8 @@ export function readAuth(): Auth | null {
 
 export function writeAuth(auth: Auth): void {
   const path = authFilePath();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(auth, null, 2), "utf8");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(auth, null, 2), { mode: 0o600 });
 }
 
 export function clearAuth(): void {

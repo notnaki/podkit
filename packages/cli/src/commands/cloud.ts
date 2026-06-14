@@ -123,10 +123,10 @@ async function login(rest: string[]): Promise<Envelope<unknown>> {
 
   const start = (await startRes.json()) as StartResponse;
 
-  openInBrowser(start.verifyUrl);
   console.error(
-    `To authorize, visit ${start.verifyUrl} and enter code: ${start.userCode}`,
+    `Your device code: ${start.userCode}  —  open ${start.verifyUrl} and enter it.`,
   );
+  openInBrowser(start.verifyUrl);
 
   const pollInterval = start.pollInterval ?? 1000;
   const maxAttempts = 120;
@@ -156,6 +156,10 @@ async function login(rest: string[]): Promise<Envelope<unknown>> {
     if (poll.status === "approved" && poll.token) {
       writeAuth({ url: base, token: poll.token });
       return ok({ status: "logged in" });
+    }
+
+    if (poll.status === "expired") {
+      return fail(new PodkitError("E_BAD_ARGS", "login code expired, try again"));
     }
   }
 

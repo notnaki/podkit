@@ -31,5 +31,6 @@ export const cliSessions = pgTable("cli_auth_sessions", {
   status: text("status").notNull(),
   accountId: uuid("account_id"),
   token: text("token"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at").defaultNow(),
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { Client } from "pg";
 import { createStore } from "../src/index.ts";
 import type { Store } from "../src/index.ts";
 
@@ -11,6 +12,7 @@ function docker(args: Array<string>): string {
 }
 
 let store: Store;
+let connectionString: string;
 
 beforeAll(async () => {
   docker([
@@ -35,7 +37,7 @@ beforeAll(async () => {
     throw new Error(`could not parse host port from: ${portLine}`);
   }
 
-  const connectionString = `postgres://postgres:pk@localhost:${hostPort}/postgres`;
+  connectionString = `postgres://postgres:pk@localhost:${hostPort}/postgres`;
   store = createStore({ connectionString });
 
   // Poll for readiness: ~30 attempts, 500ms apart.
@@ -113,6 +115,58 @@ describe("cloud-store", () => {
       expect(deployments[0].version).toBe("1.0.0");
       expect(deployments[0].hostPort).toBe(8080);
       expect(deployments[0].status).toBe("running");
+    },
+    60000,
+  );
+
+  it(
+    "cli session expiry: expired session reports expired=true and approveCliSession returns false",
+    async () => {
+      const deviceCode = randomBytes(16).toString("hex");
+      const userCode = randomBytes(4).toString("hex");
+
+      // Create a fresh session (expires in 10 minutes by default).
+      await store.createCliSession({ deviceCode, userCode });
+
+      // Verify it is not yet expired.
+      const fresh = await store.getCliSessionByDeviceCode(deviceCode);
+      expect(fresh).not.toBeNull();
+      expect(fresh!.expired).toBe(false);
+      expect(fresh!.status).toBe("pending");
+
+      // Verify a fresh session can be approved.
+      const deviceCode2 = randomBytes(16).toString("hex");
+      const userCode2 = randomBytes(4).toString("hex");
+      await store.createCliSession({ deviceCode: deviceCode2, userCode: userCode2 });
+      const approveOk = await store.approveCliSession({
+        userCode: userCode2,
+        accountId: "00000000-0000-0000-0000-000000000001",
+        token: "tok-fresh",
+      });
+      expect(approveOk).toBe(true);
+
+      // Expire the first session by backdating expires_at via a raw pg Client.
+      const pg = new Client({ connectionString });
+      await pg.connect();
+      await pg.query(
+        `UPDATE cli_auth_sessions SET expires_at = now() - interval '1 minute'
+         WHERE device_code = $1`,
+        [deviceCode],
+      );
+      await pg.end();
+
+      // Now the session should report expired=true.
+      const expired = await store.getCliSessionByDeviceCode(deviceCode);
+      expect(expired).not.toBeNull();
+      expect(expired!.expired).toBe(true);
+
+      // approveCliSession should return false for an expired session.
+      const approveExpired = await store.approveCliSession({
+        userCode,
+        accountId: "00000000-0000-0000-0000-000000000002",
+        token: "tok-should-not-be-set",
+      });
+      expect(approveExpired).toBe(false);
     },
     60000,
   );

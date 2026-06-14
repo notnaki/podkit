@@ -161,6 +161,9 @@ describe("cloud-host account auth + CLI device flow (real Docker + Postgres)", (
       const userCode = startBody.data.userCode as string;
       expect(typeof deviceCode).toBe("string");
       expect(typeof userCode).toBe("string");
+      // verifyUrl must NOT contain a pre-filled code (anti-phishing)
+      expect(startBody.data.verifyUrl).not.toContain("?code=");
+      expect(startBody.data.verifyUrl).toContain("/#/cli");
 
       // --- poll: pending ---
       const pollPendingRes = await fetch(apiUrl + "/v1/auth/cli/poll", {
@@ -231,6 +234,95 @@ describe("cloud-host account auth + CLI device flow (real Docker + Postgres)", (
       const bearerCreateBody = await bearerCreate.json();
       expect(bearerCreateBody.ok).toBe(true);
       expect(bearerCreateBody.data.project.slug).toBe("viab");
+    },
+    120000,
+  );
+
+  it(
+    "signup rejects passwords shorter than 8 characters",
+    async () => {
+      const shortPwRes = await fetch(apiUrl + "/v1/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "short@b.com", password: "abc" }),
+      });
+      expect(shortPwRes.status).toBe(400);
+      const shortPwBody = await shortPwRes.json();
+      expect(shortPwBody.ok).toBe(false);
+      expect(shortPwBody.error.code).toBe("E_BAD_ARGS");
+      expect(shortPwBody.error.message).toMatch(/8 characters/);
+    },
+    120000,
+  );
+
+  it(
+    "deploy rejects unsafe appSubpath values",
+    async () => {
+      // First create a project to deploy against (using the api key).
+      const slug = `sec-${randomBytes(3).toString("hex")}`;
+      const createRes = await fetch(apiUrl + "/v1/projects", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-podkit-key": "k",
+        },
+        body: JSON.stringify({ slug, owner: "test" }),
+      });
+      expect(createRes.status).toBe(200);
+
+      // Send deploy with a path-traversal appSubpath.
+      const deployRes = await fetch(apiUrl + `/v1/projects/${slug}/deploy`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-podkit-key": "k",
+        },
+        body: JSON.stringify({
+          contextDir: "/tmp",
+          containerPort: 3000,
+          appSubpath: "../etc",
+        }),
+      });
+      expect(deployRes.status).toBe(400);
+      const deployBody = await deployRes.json();
+      expect(deployBody.ok).toBe(false);
+      expect(deployBody.error.code).toBe("E_BAD_ARGS");
+      expect(deployBody.error.message).toMatch(/appSubpath/);
+    },
+    120000,
+  );
+
+  it(
+    "poll returns expired status for backdated session",
+    async () => {
+      // Start a new CLI session.
+      const startRes = await fetch(apiUrl + "/v1/auth/cli/start", {
+        method: "POST",
+      });
+      expect(startRes.status).toBe(200);
+      const startBody = await startRes.json();
+      const deviceCode = startBody.data.deviceCode as string;
+
+      // Backdate the session via raw SQL.
+      const pg = new Client({ connectionString });
+      await pg.connect();
+      await pg.query(
+        `UPDATE cli_auth_sessions SET expires_at = now() - interval '1 minute'
+         WHERE device_code = $1`,
+        [deviceCode],
+      );
+      await pg.end();
+
+      // Poll should now return expired status.
+      const pollRes = await fetch(apiUrl + "/v1/auth/cli/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode }),
+      });
+      expect(pollRes.status).toBe(200);
+      const pollBody = await pollRes.json();
+      expect(pollBody.ok).toBe(true);
+      expect(pollBody.data.status).toBe("expired");
     },
     120000,
   );

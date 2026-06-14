@@ -194,6 +194,25 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           ),
         };
       }
+      if (b.appSubpath !== undefined) {
+        const subpath = b.appSubpath;
+        const safe =
+          typeof subpath === "string" &&
+          subpath.length > 0 &&
+          !subpath.startsWith("/") &&
+          /^[A-Za-z0-9._/-]+$/.test(subpath) &&
+          !subpath.split("/").some((seg) => seg === "..");
+        if (!safe) {
+          return {
+            status: 400,
+            body: fail(
+              "E_BAD_ARGS",
+              "invalid appSubpath",
+              "appSubpath must be a safe relative path with no .. segments",
+            ),
+          };
+        }
+      }
       const project = await store.getProjectBySlug(slug);
       if (!project) {
         return {
@@ -269,6 +288,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_BAD_ARGS", "password required", "POST {email, password}"),
       };
     }
+    if (b.password.length < 8) {
+      return {
+        status: 400,
+        body: fail("E_BAD_ARGS", "password must be at least 8 characters"),
+      };
+    }
     const passwordHash = hashPassword(b.password);
     let account: { id: string; email: string };
     try {
@@ -329,12 +354,14 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     await store.createCliSession({ deviceCode, userCode });
     const consoleUrl =
       process.env.PODKIT_CONSOLE_URL ?? "http://localhost:5190";
+    // No pre-filled code in the URL — the user types it in the console.
+    // This defeats one-click phishing links.
     return {
       status: 200,
       body: ok({
         deviceCode,
         userCode,
-        verifyUrl: consoleUrl + "/#/cli?code=" + userCode,
+        verifyUrl: consoleUrl + "/#/cli",
         pollInterval: 1000,
       }),
     };
@@ -355,6 +382,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_NOT_FOUND", "unknown device code"),
       };
     }
+    if (session.expired && session.status !== "approved") {
+      return { status: 200, body: ok({ status: "expired" }) };
+    }
     if (session.status !== "approved") {
       return { status: 200, body: ok({ status: session.status }) };
     }
@@ -374,22 +404,25 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_BAD_ARGS", "userCode required"),
       };
     }
-    const session = await store.getCliSessionByUserCode(b.userCode);
-    if (!session || session.status !== "pending") {
-      return {
-        status: 400,
-        body: fail("E_BAD_ARGS", "invalid or already-used code"),
-      };
-    }
     const token = signToken(
       { accountId: auth.accountId, cli: true },
       authSecret,
     );
-    await store.approveCliSession({
+    const approved = await store.approveCliSession({
       userCode: b.userCode,
       accountId: auth.accountId,
       token,
     });
+    if (!approved) {
+      return {
+        status: 400,
+        body: fail(
+          "E_BAD_ARGS",
+          "code is invalid, expired, or already used",
+          "start a new login",
+        ),
+      };
+    }
     return { status: 200, body: ok({ approved: true }) };
   });
 
