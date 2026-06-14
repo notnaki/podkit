@@ -4,8 +4,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, createReadStream, statSync } from "node:fs";
+import { join, resolve, extname } from "node:path";
 import { createStore } from "@podkit/cloud-store";
 import {
   buildImage,
@@ -34,6 +34,7 @@ export type CreateCloudOptions = {
   controlPlaneConnectionString: string;
   adminConnectionString: string;
   apiKey?: string;
+  consoleDir?: string;
 };
 
 export type Cloud = {
@@ -52,6 +53,21 @@ function fail(code: string, message: string, hint?: string) {
   return { ok: false, error: { code, message, hint } };
 }
 
+const MIME: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".map": "application/json",
+  ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+};
+
+function mimeForExt(ext: string): string {
+  return MIME[ext] ?? "application/octet-stream";
+}
+
 // Parse the project slug out of a public gateway path like `/_p/<slug>/...`.
 function slugFromPath(path: string): string | null {
   const match = /^\/_p\/([^/?#]+)/.exec(path);
@@ -63,6 +79,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     connectionString: opts.controlPlaneConnectionString,
   });
   const apiKey = opts.apiKey;
+  const consoleDir = opts.consoleDir ? resolve(opts.consoleDir) : undefined;
   // Secret used to sign/verify account (and CLI) bearer tokens.
   const authSecret = resolveAuthSecret();
 
@@ -465,6 +482,59 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       try {
         const url = new URL(req.url ?? "/", "http://localhost");
         const method = req.method ?? "GET";
+
+        // Static console serving: GET requests that are not API or gateway paths.
+        if (
+          consoleDir !== undefined &&
+          method === "GET" &&
+          !url.pathname.startsWith("/v1/") &&
+          !url.pathname.startsWith("/_p/")
+        ) {
+          const rawPath = url.pathname === "/" ? "/index.html" : url.pathname;
+          // Security: resolve and verify the joined path stays within consoleDir.
+          const safePath = resolve(join(consoleDir, rawPath));
+          if (!safePath.startsWith(consoleDir + "/") && safePath !== consoleDir) {
+            res.statusCode = 403;
+            res.end("Forbidden");
+            return;
+          }
+          const ext = extname(safePath);
+          if (existsSync(safePath)) {
+            try {
+              const stat = statSync(safePath);
+              res.statusCode = 200;
+              res.setHeader("content-type", mimeForExt(ext));
+              res.setHeader("content-length", stat.size);
+              createReadStream(safePath).pipe(res);
+            } catch {
+              res.statusCode = 500;
+              res.end("Internal Server Error");
+            }
+            return;
+          }
+          // SPA fallback: no extension => serve index.html.
+          if (ext === "") {
+            const indexPath = resolve(join(consoleDir, "index.html"));
+            if (existsSync(indexPath)) {
+              try {
+                const stat = statSync(indexPath);
+                res.statusCode = 200;
+                res.setHeader("content-type", "text/html");
+                res.setHeader("content-length", stat.size);
+                createReadStream(indexPath).pipe(res);
+              } catch {
+                res.statusCode = 500;
+                res.end("Internal Server Error");
+              }
+              return;
+            }
+          }
+          // Asset not found (has an extension).
+          res.statusCode = 404;
+          res.end("Not Found");
+          return;
+        }
+
         const body = method === "POST" ? await readJson(req) : undefined;
         const m = router.match(method, url.pathname);
         if (!m) {

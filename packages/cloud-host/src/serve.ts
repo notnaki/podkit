@@ -27,6 +27,7 @@ async function main(): Promise<void> {
     controlPlaneConnectionString,
     adminConnectionString,
     apiKey,
+    consoleDir: process.env.PODKIT_CONSOLE_DIR || undefined,
   });
 
   const { apiUrl, gatewayUrl } = await cloud.listen({ apiPort, gatewayPort });
