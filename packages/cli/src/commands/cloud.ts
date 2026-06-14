@@ -86,7 +86,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -385,6 +385,49 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
 
     if (subcommand === "whoami") {
       return await callControlPlane("GET", "/v1/auth/me");
+    }
+
+    if (subcommand === "status") {
+      const [slug] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "status requires a slug", AVAILABLE),
+        );
+      }
+      const [proj, depls, env, domains] = await Promise.all([
+        callControlPlane("GET", `/v1/projects/${slug}`),
+        callControlPlane("GET", `/v1/projects/${slug}/deployments`),
+        callControlPlane("GET", `/v1/projects/${slug}/env`),
+        callControlPlane("GET", `/v1/projects/${slug}/domains`),
+      ]);
+      if (!proj.ok) return proj;
+      const pd = proj.data as any;
+      const dd = depls.ok ? (depls.data as any) : null;
+      const deployments = Array.isArray(dd?.deployments)
+        ? dd.deployments
+        : Array.isArray(dd)
+          ? dd
+          : null;
+      const ed = env.ok ? (env.data as any) : null;
+      const od = domains.ok ? (domains.data as any) : null;
+      return ok({
+        slug,
+        url: pd?.url ?? null,
+        latestDeployment:
+          deployments && deployments.length > 0
+            ? deployments[deployments.length - 1]
+            : null,
+        envCount: Array.isArray(ed?.env)
+          ? ed.env.length
+          : Array.isArray(ed)
+            ? ed.length
+            : 0,
+        domainCount: Array.isArray(od?.domains)
+          ? od.domains.length
+          : Array.isArray(od)
+            ? od.length
+            : 0,
+      });
     }
 
     return fail(

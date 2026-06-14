@@ -98,15 +98,46 @@ export function Project({ slug }: { slug: string }) {
             <div className="panel-head"><h3>Settings</h3></div>
             <div className="panel-body stack">
               <dl className="kv"><dt>Project ID</dt><dd className="mono faint" style={{ wordBreak: "break-all" }}>{detail.data?.project.id}</dd></dl>
-              <div className="row" style={{ justifyContent: "space-between", padding: "var(--space-sm) 0", borderTop: "1px solid var(--border)" }}>
-                <div><div style={{ fontWeight: 600 }}>Delete project</div><div className="faint" style={{ fontSize: "var(--t-sm)" }}>Tears down the container and database. Not yet available.</div></div>
-                <button className="btn btn-danger" disabled>Delete</button>
-              </div>
+              <DangerZone slug={slug} />
             </div>
           </section>
         )}
       </main>
     </>
+  );
+}
+
+function DangerZone({ slug }: { slug: string }) {
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const hasKey = getToken() !== "";
+  const armed = confirm === slug;
+
+  async function remove() {
+    setBusy(true); setNote(null);
+    const res = await api.deleteProject(slug);
+    if (res.ok) {
+      // Project is gone — return to the projects list.
+      window.location.hash = "#/";
+    } else {
+      setBusy(false);
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+    }
+  }
+
+  return (
+    <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", gap: "var(--space-lg)", padding: "var(--space-md) 0 0", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+      <div style={{ flex: 1, minWidth: 240 }}>
+        <div style={{ fontWeight: 600 }}>Delete project</div>
+        <div className="faint" style={{ fontSize: "var(--t-sm)", maxWidth: "52ch" }}>Tears down the running container, drops the managed database and its role, and removes all deployments, env, and domains. This cannot be undone. Type <span className="mono">{slug}</span> to confirm.</div>
+        {note && <span className="status status-error" style={{ marginTop: "var(--space-sm)" }}><span className="dot" />{note.text}</span>}
+      </div>
+      <div className="row" style={{ gap: "var(--space-sm)" }}>
+        <input className="input mono" placeholder={slug} value={confirm} onChange={(e) => setConfirm(e.target.value)} style={{ width: 160 }} />
+        <button className="btn btn-danger" disabled={!hasKey || !armed || busy} onClick={remove}>{busy ? "Deleting…" : "Delete"}</button>
+      </div>
+    </div>
   );
 }
 

@@ -242,4 +242,36 @@ describe("cloud-store", () => {
     },
     60000,
   );
+
+  it(
+    "deleteProject removes project and cascades",
+    async () => {
+      const slug = `del-${randomBytes(3).toString("hex")}`;
+      const p = await store.createProject({ slug, owner: "" });
+      await store.setEnv({
+        projectId: p.id,
+        key: "K",
+        value: "v",
+        sensitive: false,
+      });
+      await store.addDomain({ projectId: p.id, domain: `${slug}.example.com` });
+      await store.recordDeployment({
+        projectId: p.id,
+        version: "v1",
+        containerId: "c-del",
+        hostPort: 6001,
+        status: "running",
+        containerPort: 3000,
+        kind: "deploy",
+      });
+
+      await store.deleteProject(p.id);
+
+      expect(await store.getProjectBySlug(slug)).toBeNull();
+      expect(await store.listEnv(p.id)).toEqual([]);
+      expect(await store.listDomains(p.id)).toEqual([]);
+      expect(await store.listDeployments(p.id)).toEqual([]);
+    },
+    60000,
+  );
 });
