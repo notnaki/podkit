@@ -36,6 +36,12 @@ async function main(): Promise<void> {
     consoleDir: process.env.PODKIT_CONSOLE_DIR || undefined,
     corsOrigins: process.env.PODKIT_CORS_ORIGINS || undefined,
     baseImage,
+    maxProjectsPerAccount: process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT
+      ? Number(process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT)
+      : undefined,
+    rateLimitPerMin: process.env.PODKIT_RATE_LIMIT_PER_MIN
+      ? Number(process.env.PODKIT_RATE_LIMIT_PER_MIN)
+      : undefined,
   });
 
   const { apiUrl, gatewayUrl } = await cloud.listen({ apiPort, gatewayPort });
