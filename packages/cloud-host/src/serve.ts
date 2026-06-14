@@ -28,6 +28,7 @@ async function main(): Promise<void> {
     adminConnectionString,
     apiKey,
     consoleDir: process.env.PODKIT_CONSOLE_DIR || undefined,
+    corsOrigins: process.env.PODKIT_CORS_ORIGINS || undefined,
   });
 
   const { apiUrl, gatewayUrl } = await cloud.listen({ apiPort, gatewayPort });

@@ -88,14 +88,17 @@ export function createAuth(opts: {
     return { userId, isAgent, scopes };
   }
 
-  function issueAgentToken({
-    userId,
-    scopes,
-  }: {
-    userId: string;
-    scopes: string[];
-  }): string {
-    return issueAgentTokenFromToken({ userId, scopes }, secret);
+  function issueAgentToken(
+    {
+      userId,
+      scopes,
+    }: {
+      userId: string;
+      scopes: string[];
+    },
+    ttlSeconds?: number
+  ): string {
+    return issueAgentTokenFromToken({ userId, scopes }, secret, ttlSeconds);
   }
 
   return { signup, login, verifySession, issueAgentToken };

@@ -4,8 +4,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes } from "node:crypto";
-import { existsSync, createReadStream, statSync } from "node:fs";
-import { join, resolve, extname } from "node:path";
+import { existsSync, createReadStream, statSync, realpathSync } from "node:fs";
+import { join, resolve, extname, relative, isAbsolute, sep } from "node:path";
 import { createStore } from "@podkit/cloud-store";
 import {
   buildImage,
@@ -27,6 +27,8 @@ import {
   createRouter,
   sendJson,
   readJson,
+  parseCorsOrigins,
+  resolveCorsHeader,
 } from "@podkit/cloud";
 import {
   hashPassword,
@@ -41,6 +43,7 @@ export type CreateCloudOptions = {
   adminConnectionString: string;
   apiKey?: string;
   consoleDir?: string;
+  corsOrigins?: string;
 };
 
 export type Cloud = {
@@ -80,14 +83,175 @@ function slugFromPath(path: string): string | null {
   return match ? match[1]! : null;
 }
 
+// Broad classes of system / shared directories a build context must never point
+// at. Pointing a build at any of these would (at best) fail at build time and
+// (at worst) leak host source or secrets into an image, so reject them up front.
+const SYSTEM_PATHS = [
+  "/etc",
+  "/var",
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/sys",
+  "/proc",
+  "/dev",
+  "/root",
+  "/home",
+  "/tmp",
+];
+
+// True when `target` is equal to, or nested inside, `base` (both absolute,
+// real, normalized). Uses path.relative so it is robust against ".." and
+// trailing-separator differences and works cross-platform.
+function isWithin(base: string, target: string): boolean {
+  if (target === base) return true;
+  const rel = relative(base, target);
+  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+type ContextDirResult =
+  | { path: string }
+  | { error: { code: string; message: string; hint: string } };
+
+// Validate and resolve a caller-supplied build-context directory. Resolving to
+// the real path (realpathSync) collapses symlinks and ".." so the checks below
+// see the true on-disk location an attacker cannot disguise.
+function validateContextDir(
+  input: string,
+  controlPlaneRoot: string,
+  buildsRoot: string | null,
+): ContextDirResult {
+  if (typeof input !== "string" || input.length === 0) {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir is required",
+        hint: "pass an absolute path to the build context directory",
+      },
+    };
+  }
+  let real: string;
+  try {
+    real = realpathSync(resolve(input));
+  } catch {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir does not exist or cannot be read",
+        hint: "pass a path to an existing directory you control",
+      },
+    };
+  }
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(real);
+  } catch {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir does not exist or cannot be read",
+        hint: "pass a path to an existing directory you control",
+      },
+    };
+  }
+  if (!stat.isDirectory()) {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir is not a directory",
+        hint: "pass a path to a directory, not a file",
+      },
+    };
+  }
+  // Always reject overlap with the control-plane source root, even inside an
+  // explicit builds sandbox: the control plane's own source is never a tenant
+  // build context.
+  if (isWithin(controlPlaneRoot, real)) {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir overlaps with the control-plane source root",
+        hint: "build from your application directory, not the podkit control plane",
+      },
+    };
+  }
+  if (buildsRoot !== null) {
+    // An explicit sandbox is the authoritative allowlist: the operator has
+    // opted into this location, so confinement to it replaces the broad
+    // system-path denylist (which is the default-on guardrail otherwise).
+    if (!isWithin(buildsRoot, real)) {
+      return {
+        error: {
+          code: "E_BAD_ARGS",
+          message:
+            "contextDir is outside the allowed builds root (set via PODKIT_BUILDS_ROOT)",
+          hint: "place the build context under " + buildsRoot,
+        },
+      };
+    }
+    return { path: real };
+  }
+  if (real === sep) {
+    return {
+      error: {
+        code: "E_BAD_ARGS",
+        message: "contextDir points to a system directory (rejected for security)",
+        hint: "build from an application source directory, not the filesystem root",
+      },
+    };
+  }
+  for (const sysPath of SYSTEM_PATHS) {
+    if (isWithin(sysPath, real)) {
+      return {
+        error: {
+          code: "E_BAD_ARGS",
+          message:
+            "contextDir points to a system directory (rejected for security)",
+          hint: "build from an application source directory, not " + sysPath,
+        },
+      };
+    }
+  }
+  return { path: real };
+}
+
 export function createCloud(opts: CreateCloudOptions): Cloud {
   const store = createStore({
     connectionString: opts.controlPlaneConnectionString,
   });
   const apiKey = opts.apiKey;
   const consoleDir = opts.consoleDir ? resolve(opts.consoleDir) : undefined;
+  // Optional CORS allowlist. Unset (null) preserves the permissive "*" default
+  // so local dev and the Vite proxy keep working; when set, only listed Origins
+  // are reflected back (with Vary: Origin so caches stay correct).
+  const allowedOrigins = parseCorsOrigins(
+    opts.corsOrigins ?? process.env.PODKIT_CORS_ORIGINS ?? undefined,
+  );
   // Secret used to sign/verify account (and CLI) bearer tokens.
   const authSecret = resolveAuthSecret();
+
+  // Build-context sandboxing. The control-plane source root is never a valid
+  // build context; default it to the resolved cwd at startup (overridable for
+  // deployments where the control plane runs from a different directory).
+  // PODKIT_BUILDS_ROOT, when set, confines all build contexts under one
+  // operator-chosen directory (an explicit opt-in sandbox).
+  const controlPlaneRoot = (() => {
+    const raw = process.env.PODKIT_CONTROL_PLANE_ROOT ?? process.cwd();
+    try {
+      return realpathSync(resolve(raw));
+    } catch {
+      return resolve(raw);
+    }
+  })();
+  const buildsRoot = (() => {
+    const raw = process.env.PODKIT_BUILDS_ROOT;
+    if (!raw) return null;
+    try {
+      return realpathSync(resolve(raw));
+    } catch {
+      return resolve(raw);
+    }
+  })();
 
   // Resolve an authenticated account from an Authorization: Bearer <token>
   // header. Returns null when the header is missing/malformed or the token is
@@ -277,6 +441,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           };
         }
       }
+      // Validate + resolve the build context to a real on-disk path, rejecting
+      // system directories, the control-plane source, and (when configured)
+      // anything outside the builds sandbox. Defense-in-depth alongside the
+      // appSubpath whitelist above and Docker's own filesystem isolation.
+      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
+      if ("error" in ctx) {
+        return {
+          status: 400,
+          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
+        };
+      }
+      const contextDir = ctx.path;
       const project = await store.getProjectBySlug(slug);
       if (!project) {
         return {
@@ -294,12 +470,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
       // Build the image: an explicit Dockerfile wins; otherwise, if it's a
       // podkit app (has app/routes), the buildpack generates one — zero-config.
-      const appDir = b.appSubpath ? join(b.contextDir, b.appSubpath) : b.contextDir;
+      const appDir = b.appSubpath ? join(contextDir, b.appSubpath) : contextDir;
       if (existsSync(join(appDir, "Dockerfile"))) {
         await buildImage({ contextDir: appDir, tag });
       } else if (isPodkitApp(appDir)) {
         await buildPodkitApp({
-          repoRoot: b.contextDir,
+          repoRoot: contextDir,
           appSubpath: b.appSubpath ?? ".",
           tag,
           port: b.containerPort,
@@ -962,7 +1138,19 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   const server = createServer(
     async (req: IncomingMessage, res: ServerResponse) => {
       // CORS: the cloud console is a separate origin from the control-plane.
-      res.setHeader("access-control-allow-origin", "*");
+      if (allowedOrigins === null) {
+        // No allowlist configured: preserve the permissive wildcard default.
+        res.setHeader("access-control-allow-origin", "*");
+      } else {
+        const requestOrigin = Array.isArray(req.headers.origin)
+          ? req.headers.origin[0]
+          : req.headers.origin;
+        const resolved = resolveCorsHeader(requestOrigin, allowedOrigins);
+        if (resolved.vary) res.setHeader("vary", "Origin");
+        if (resolved.origin !== null) {
+          res.setHeader("access-control-allow-origin", resolved.origin);
+        }
+      }
       res.setHeader(
         "access-control-allow-headers",
         "content-type, x-podkit-key, authorization",

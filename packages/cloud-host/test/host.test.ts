@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "pg";
@@ -81,6 +81,11 @@ beforeAll(async () => {
   await waitForPostgres(connectionString);
 
   // 2. Build a fixture app context dir.
+  // Confine the build-context sandbox to the OS temp dir so the realpath'd
+  // fixture below is always allowed (on Linux tmpdir is /tmp, which the
+  // default system-path denylist rejects; PODKIT_BUILDS_ROOT is the explicit
+  // opt-in that overrides it). realpath so symlinked tmp dirs (macOS) match.
+  process.env.PODKIT_BUILDS_ROOT = realpathSync(tmpdir());
   fixtureDir = mkdtempSync(join(tmpdir(), "podkit-app-"));
   writeFileSync(
     join(fixtureDir, "Dockerfile"),
@@ -117,6 +122,7 @@ beforeAll(async () => {
 }, 120000);
 
 afterAll(async () => {
+  delete process.env.PODKIT_BUILDS_ROOT;
   if (cloud) {
     try {
       await cloud.close();
@@ -128,6 +134,14 @@ afterAll(async () => {
     await dropDatabase({
       adminConnectionString: connectionString,
       database: "proj_demo",
+    });
+  } catch {
+    // ignore
+  }
+  try {
+    await dropDatabase({
+      adminConnectionString: connectionString,
+      database: "proj_secok",
     });
   } catch {
     // ignore
@@ -246,6 +260,64 @@ describe("cloud-host full loop (real Docker + Postgres)", () => {
       const unauthBody = await unauthRes.json();
       expect(unauthBody.ok).toBe(false);
       expect(unauthBody.error.code).toBe("E_UNAUTHORIZED");
+    },
+    120000,
+  );
+
+  it(
+    "rejects dangerous contextDir values and accepts the sandboxed fixture",
+    async () => {
+      // /etc lives outside the build sandbox (PODKIT_BUILDS_ROOT = tmpdir) and
+      // is a system directory either way: must be rejected with 400 E_BAD_ARGS.
+      // Validation runs before project lookup, so an unknown slug still 400s.
+      const etcRes = await fetch(apiUrl + "/v1/projects/sec-demo/deploy", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ contextDir: "/etc", containerPort: 3000 }),
+      });
+      expect(etcRes.status).toBe(400);
+      const etcBody = await etcRes.json();
+      expect(etcBody.ok).toBe(false);
+      expect(etcBody.error.code).toBe("E_BAD_ARGS");
+
+      // /var: another system directory outside the sandbox.
+      const varRes = await fetch(apiUrl + "/v1/projects/sec-demo/deploy", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ contextDir: "/var", containerPort: 3000 }),
+      });
+      expect(varRes.status).toBe(400);
+      const varBody = await varRes.json();
+      expect(varBody.error.code).toBe("E_BAD_ARGS");
+
+      // Non-existent path: realpath fails -> rejected with a clear message.
+      const noexistRes = await fetch(apiUrl + "/v1/projects/sec-demo/deploy", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({
+          contextDir: join(tmpdir(), "does-not-exist-12345abcde"),
+          containerPort: 3000,
+        }),
+      });
+      expect(noexistRes.status).toBe(400);
+      const noexistBody = await noexistRes.json();
+      expect(noexistBody.error.code).toBe("E_BAD_ARGS");
+      expect(noexistBody.error.message).toContain("does not exist");
+
+      // The existing tmp fixture (under PODKIT_BUILDS_ROOT) still deploys.
+      await fetch(apiUrl + "/v1/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ slug: "secok", owner: "me" }),
+      });
+      const validRes = await fetch(apiUrl + "/v1/projects/secok/deploy", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-podkit-key": "k" },
+        body: JSON.stringify({ contextDir: fixtureDir, containerPort: 3000 }),
+      });
+      expect(validRes.status).toBe(200);
+      const validBody = await validRes.json();
+      expect(validBody.ok).toBe(true);
     },
     120000,
   );

@@ -177,6 +177,9 @@ importers:
 
   packages/cloud-store:
     dependencies:
+      '@podkit/auth':
+        specifier: workspace:*
+        version: link:../auth
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@electric-sql/pglite@0.5.2)(@types/pg@8.20.0)(pg@8.21.0)
