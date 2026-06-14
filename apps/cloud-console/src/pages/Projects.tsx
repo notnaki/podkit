@@ -78,6 +78,21 @@ function ProjectCard({ p }: { p: Project }) {
   );
 }
 
+// Subtle, on-brand copy button for the one-time connection string.
+function CopyConn({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // Clipboard unavailable — fail quietly.
+    }
+  }
+  return <button className="btn btn-ghost btn-sm" onClick={copy}>{copied ? "✓ Copied" : "Copy"}</button>;
+}
+
 function CreateProject({ onDone }: { onDone: () => void }) {
   const [slug, setSlug] = useState("");
   const [owner, setOwner] = useState("");
@@ -100,7 +115,10 @@ function CreateProject({ onDone }: { onDone: () => void }) {
         <div className="panel-head"><h3>Project created</h3><span className="status status-ready"><span className="dot" />provisioned</span></div>
         <div className="panel-body stack">
           <div className="field">
-            <label>Database connection string <span className="faint">— shown once, store it now</span></label>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+              <label>Database connection string <span className="faint">— shown once, store it now</span></label>
+              {result.connectionString && <CopyConn value={result.connectionString} />}
+            </div>
             <div className="code" style={{ wordBreak: "break-all" }}>{result.connectionString ?? "(connection available via the API)"}</div>
           </div>
           <div className="row">

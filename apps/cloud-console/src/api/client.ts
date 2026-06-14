@@ -84,6 +84,16 @@ export interface ProjectDetail { project: Project; latest: Deployment | null; ur
 export interface CreatedProject { project: Project; database?: string; connectionString?: string }
 export interface EnvVar { key: string; sensitive: boolean; value: string | null }
 export interface Domain { domain: string }
+export interface Metrics {
+  requests: number;
+  status2xx: number;
+  status3xx: number;
+  status4xx: number;
+  status5xx: number;
+  avgLatencyMs: number;
+  lastSeen: number | null;
+}
+export interface QueryResult { rows: Record<string, unknown>[]; rowCount: number }
 
 export const api = {
   health: () => call<{ status: string }>("GET", "/v1/health"),
@@ -115,10 +125,23 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/rollback`,
       { deploymentId },
     ),
-  getLogs: (slug: string) =>
-    call<{ deploymentId: string | null; version: string | null; logs: string }>(
+  getLogs: (slug: string, opts?: { limit?: number; since?: string }) => {
+    const qs: string[] = [];
+    if (opts?.limit !== undefined) qs.push(`limit=${encodeURIComponent(String(opts.limit))}`);
+    if (opts?.since !== undefined && opts.since !== "") qs.push(`since=${encodeURIComponent(opts.since)}`);
+    const suffix = qs.length > 0 ? `?${qs.join("&")}` : "";
+    return call<{ deploymentId: string | null; version: string | null; logs: string }>(
       "GET",
-      `/v1/projects/${encodeURIComponent(slug)}/logs`,
+      `/v1/projects/${encodeURIComponent(slug)}/logs${suffix}`,
+    );
+  },
+  getMetrics: (slug: string) =>
+    call<Metrics>("GET", `/v1/projects/${encodeURIComponent(slug)}/metrics`),
+  runQuery: (slug: string, sql: string, params?: (string | number)[]) =>
+    call<QueryResult>(
+      "POST",
+      `/v1/projects/${encodeURIComponent(slug)}/db/query`,
+      params !== undefined ? { sql, params } : { sql },
     ),
   deployProject: (slug: string, contextDir: string, containerPort: number) =>
     call<{ version: string; hostPort: number; url: string }>(
