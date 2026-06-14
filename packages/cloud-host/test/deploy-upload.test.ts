@@ -250,7 +250,14 @@ afterAll(async () => {
       // ignore
     }
   }
-  for (const db of ["proj_upl", "proj_uplsub", "proj_uplmal", "proj_uplown"]) {
+  for (const db of [
+    "proj_upl",
+    "proj_uplsub",
+    "proj_uplmal",
+    "proj_uplown",
+    "proj_uplprev",
+    "proj_uplprev_staging",
+  ]) {
     try {
       await dropDatabase({ adminConnectionString: connectionString, database: db });
     } catch {
@@ -278,6 +285,7 @@ afterAll(async () => {
     "podkit-uplsub:v",
     "podkit-uplmal:v",
     "podkit-uplown:v",
+    "podkit-uplprev:v",
   ]);
 }, 120000);
 
@@ -366,6 +374,65 @@ describe("upload-based deploy (real Docker + Postgres)", () => {
       expect(served).toContain("hello from subpath app");
     },
     180000,
+  );
+
+  it(
+    "preview-deploys an uploaded app against a DB branch at its own URL",
+    async () => {
+      await createProject("uplprev");
+      // Create a branch to preview against.
+      const br = await fetch(apiUrl + "/v1/projects/uplprev/branches", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ownerToken}`,
+        },
+        body: JSON.stringify({ name: "staging" }),
+      });
+      expect(br.status).toBe(200);
+
+      const tarPath = join(buildsRoot, `up-${randomBytes(4).toString("hex")}.tgz`);
+      await tarDir(dockerfileFixture, tarPath);
+      const res = await postRaw(
+        "/v1/projects/uplprev/deploy-upload?containerPort=3000&branchName=staging",
+        createReadStream(tarPath),
+        { "content-type": "application/gzip", authorization: `Bearer ${ownerToken}` },
+      );
+      rmSync(tarPath, { force: true });
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.data.branchName).toBe("staging");
+      expect(String(res.body.data.url)).toContain("/_p/uplprev--staging/");
+
+      // Preview serves on its own route.
+      let served = "";
+      for (let i = 0; i < 30; i++) {
+        try {
+          const r = await fetch(gatewayUrl + "/_p/uplprev--staging/");
+          const t = await r.text();
+          if (t.includes("hello from uploaded app")) {
+            served = t;
+            break;
+          }
+        } catch {
+          // ignore
+        }
+        await sleep(1000);
+      }
+      expect(served).toContain("hello from uploaded app");
+
+      // Unknown branch via upload -> 404.
+      const tarPath2 = join(buildsRoot, `up-${randomBytes(4).toString("hex")}.tgz`);
+      await tarDir(dockerfileFixture, tarPath2);
+      const missing = await postRaw(
+        "/v1/projects/uplprev/deploy-upload?containerPort=3000&branchName=nope",
+        createReadStream(tarPath2),
+        { "content-type": "application/gzip", authorization: `Bearer ${ownerToken}` },
+      );
+      rmSync(tarPath2, { force: true });
+      expect(missing.status).toBe(404);
+    },
+    240000,
   );
 
   it(

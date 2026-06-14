@@ -73,6 +73,7 @@ async function deployUpload(
   contextDir: string,
   containerPort: number,
   appSubpath: string | null,
+  branchName?: string | null,
 ): Promise<Envelope<unknown>> {
   const base = resolveBase();
   let url: URL;
@@ -80,7 +81,8 @@ async function deployUpload(
     const path =
       `/v1/projects/${encodeURIComponent(slug)}/deploy-upload` +
       `?containerPort=${encodeURIComponent(String(containerPort))}` +
-      (appSubpath ? `&appSubpath=${encodeURIComponent(appSubpath)}` : "");
+      (appSubpath ? `&appSubpath=${encodeURIComponent(appSubpath)}` : "") +
+      (branchName ? `&branchName=${encodeURIComponent(branchName)}` : "");
     url = new URL(base + path);
   } catch {
     return fail(new PodkitError("E_BAD_ARGS", "invalid control-plane URL"));
@@ -389,6 +391,7 @@ async function previewCommand(rest: string[]): Promise<Envelope<unknown>> {
     );
   }
   const contextDir = parseFlag(rest, "--contextDir") ?? process.cwd();
+  const appSubpath = parseFlag(rest, "--appSubpath") ?? null;
   const portStr = parseFlag(rest, "--containerPort");
   const containerPort = portStr
     ? Number(portStr)
@@ -402,11 +405,9 @@ async function previewCommand(rest: string[]): Promise<Envelope<unknown>> {
       ),
     );
   }
-  return await callControlPlane(
-    "POST",
-    `/v1/projects/${slug}/deploy-branch`,
-    { branchName, contextDir, containerPort },
-  );
+  // Preview deploys upload the app source (same path as `deploy`) so they work
+  // against a hosted control-plane, targeting the branch via ?branchName=.
+  return await deployUpload(slug, contextDir, containerPort, appSubpath, branchName);
 }
 
 async function domainsCommand(rest: string[]): Promise<Envelope<unknown>> {
