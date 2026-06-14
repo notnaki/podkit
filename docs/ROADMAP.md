@@ -52,16 +52,17 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Security hardening** (PR #22, multi-agent audit→fix workflow): (1) **multi-tenant ownership enforcement** — every project-scoped endpoint now requires the bearer account to OWN the project (machine key = full access), 403 `E_FORBIDDEN` otherwise; `GET /v1/projects` filters to the caller; **create binds owner to the authenticated account** (not the request body — closes a lockout + spoof hole). (2) error-message masking (no stack/cred leakage in 500s). (3) container resource limits (`--memory/--cpus/--pids-limit/--ulimit`). (4) request body-size cap (1 MiB → 413).
 - **CLI/console/lifecycle improvements** (PR #21, worktree-isolated workflow): CLI semantic exit codes + `--quiet`; `podkit cloud status <slug>`; **`DELETE /v1/projects/:slug`** full teardown (stop container, drop DB+role, cascade env/domains/deployments) + working console **Delete** button; "deployed N ago" age on project cards.
 - **Hardening batch 2** (PR #23): (1) **secrets-at-rest** — `project_env` values AES-256-GCM encrypted (`PODKIT_SECRETS_KEY`, prod-required; legacy plaintext passthrough, no migration). (2) **token expiry** — `signToken(…, ttlSeconds?)` stamps `iat`/`exp`, `verifyToken` rejects expired (backward-tolerant). (3) **CORS allowlist** — `PODKIT_CORS_ORIGINS` (unset = prior `*`). (4) **deploy build-context sandboxing** — `validateContextDir` rejects `..`/system dirs/control-plane overlap; `PODKIT_BUILDS_ROOT` confines builds.
+- **Hardening batch 3** (PR #24): (1) **token TTL wiring + revocation** — issue sites now stamp TTLs (account 30d, CLI 90d) + a `jti`; `revoked_tokens` table + `POST /v1/auth/logout` revokes by `jti`; `accountFromAuth` rejects revoked tokens (jti-less = backward-compatible). (2) **container hardening** — tenant containers run `--cap-drop ALL`, `--security-opt no-new-privileges`, ports bound to `127.0.0.1` only. (3) **e2e test-image cleanup** — best-effort `afterAll docker rmi` per suite so built images stop accumulating.
 
 ## 📋 To do — cloud hardening (toward production)
 
-1. **Token revocation + device-flow rate-limiting** — expiry shipped (#23); still need a revocation/logout table + per-request check, higher userCode entropy, and rate-limiting on `/cli/approve`. Also wire TTLs at the issue sites (login/cli tokens currently issued with no `exp`).
-2. **Secret-injection redesign** — env is encrypted at rest (#23) but still injected as plaintext `-e` into containers and the per-project connection string is returned in the create response; move to a credential-broker / Docker secrets flow.
-3. **docker.sock host-escape** — the control-plane mounts the host Docker socket; move to a brokered build/run service or orchestrator. Container hardening: `--cap-drop`, `--read-only`, 127.0.0.1 port binding, non-root USER, pinned image digests.
+1. **Device-flow rate-limiting** — raise `userCode` entropy and rate-limit `/v1/auth/cli/approve` (token expiry+revocation shipped in #23/#24).
+2. **Secret-injection redesign** — env is encrypted at rest (#23) but still injected as plaintext `-e` into containers, and the per-project connection string is returned in the create response; move to a credential-broker / Docker secrets flow.
+3. **docker.sock host-escape** — the control-plane mounts the host Docker socket; move to a brokered build/run service or orchestrator. (Per-container hardening flags `--cap-drop`/`no-new-privileges`/127.0.0.1 binding shipped in #24; still want `--read-only` rootfs, non-root USER in images, pinned image digests.)
 4. **Domain ownership verification + TLS** — DNS TXT challenge + ACME cert issuance for custom domains.
 5. **Standalone buildpack** — support apps outside the monorepo (published packages).
 6. **Prod app bundling** — containers run the dev server; add an optimized production build/runtime, cold-start, edge.
-7. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources. (Related hygiene: e2e tests leave built `podkit-<slug>:<version>` images — add `afterAll` image cleanup.)
+7. **Stop superseded containers on deploy/rollback** — prior container lingers until shutdown; reap to reclaim resources.
 8. **DB branching, telemetry-at-scale, self-host packaging (IaC).**
 
 ---
