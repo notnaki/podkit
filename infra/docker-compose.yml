@@ -29,6 +29,7 @@ services:
       PODKIT_API_KEY: podkit-dev
       PODKIT_API_PORT: "8080"
       PODKIT_GATEWAY_PORT: "8090"
+      PODKIT_CONSOLE_DIR: /app/apps/cloud-console/dist
     ports:
       - "8080:8080"
       - "8090:8090"

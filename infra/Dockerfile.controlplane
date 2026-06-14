@@ -22,5 +22,8 @@ WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile=false
 
+# Build the cloud console so the control-plane can serve it as static files.
+RUN pnpm --filter @podkit/cloud-console build
+
 # The control-plane reads its config from the environment (see serve.ts).
 CMD ["node", "packages/cloud-host/src/serve.ts"]

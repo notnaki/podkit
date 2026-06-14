@@ -9,7 +9,7 @@ const URL_KEY = "podkit.cloud.apiUrl";
 const TOKEN_KEY = "podkit.cloud.token";
 
 export function getApiUrl(): string {
-  return localStorage.getItem(URL_KEY) ?? "http://localhost:8080";
+  return localStorage.getItem(URL_KEY) ?? "";
 }
 export function setApiUrl(url: string): void {
   localStorage.setItem(URL_KEY, url);
@@ -26,10 +26,12 @@ export function clearToken(): void {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<Envelope<T>> {
-  const url = getApiUrl();
+  const base = getApiUrl();
   const token = getToken();
+  // When base is "" (same-origin), use a plain relative path; otherwise strip trailing slash.
+  const href = base === "" ? path : base.replace(/\/$/, "") + path;
   try {
-    const res = await fetch(url.replace(/\/$/, "") + path, {
+    const res = await fetch(href, {
       method,
       headers: {
         "content-type": "application/json",
