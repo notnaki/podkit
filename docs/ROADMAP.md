@@ -60,12 +60,35 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Reap superseded containers** (PR #29): deploy/rollback now stops the container it replaced (after the routeMap cutover, so no dropped traffic) instead of leaking it until shutdown.
 - **Database branching** (PR #30, Supabase-class): isolated per-project Postgres branches (copy-on-create via `CREATE DATABASE … WITH TEMPLATE`), each with its own scoped non-superuser role; `project_branches` table; ownership-gated `POST/GET/DELETE /v1/projects/:slug/branches`; `podkit cloud branches`; console Branches panel in the Database tab.
 - **CI flake fix** (PR #31): the dev server gave Vite's HMR websocket a unique random port instead of the fixed 24678, killing the "Port already in use" collision that flaked the suite under parallel load.
+- **Public site** (PR #39): the cloud-console is now the product front door — a public `/` landing + a unified `/docs` (CLI + framework + cloud, sourced from real code), with public-vs-gated routing (`#/dashboard` holds the projects UI). Verified visually.
+- **One-click deploy** (PR #38): `podkit cloud deploy <slug>` — no Dockerfile, no monorepo, no flags. Standalone apps build on a vendored `podkit-base` image (`infra/Dockerfile.base`, grafted into the base pnpm workspace); `waitForReadiness` health-checks the new container before the route cutover (zero-downtime). Verified live + e2e.
 - **Hardening sweep** (PR #37, adversarial review→verify→fix): fixed real lifecycle/security bugs from fast feature work — project-delete now drops all branch DBs+roles (was leaking), delete stops the *actual* production container, a second "active deployment" mis-computation, a container leak when the deploy-record insert fails, contextDir FS-validation moved after the ownership check (was an info-leak), and gateway error responses no longer leak upstream details. 310 tests.
 - **Preview-deploy via upload** (PR #36): `podkit cloud preview <slug> <branch>` now tars + streams the app (like prod deploy) to `deploy-upload?branchName=`, so previews work on a hosted cloud — own URL (`/_p/<slug>--<branch>/`), branch-scoped `DATABASE_URL`. **Full hosted loop verified live: prod + preview both deploy from disk and serve, distinct env + DB.**
 - **Containerized routing fix** (PR #35): when the control-plane runs in a container (the real hosted deployment), it now reaches app containers over a shared `podkit` Docker network by container name (`PODKIT_APP_NETWORK`) instead of the host's loopback — fixing 502s that the host-mode test suite never caught. **Verified live: deploy via upload → gateway serves the app.**
 - **Upload-based deploy** (PR #34): `podkit cloud deploy` tars + streams the app to `POST /v1/projects/:slug/deploy-upload` (streamed, 500 MiB cap); the control-plane extracts it (pre-flight + realpath/symlink traversal defense, guaranteed cleanup) and builds — so apps no longer need to be co-located on the control-plane. Dockerfile apps deploy fully standalone.
 - **Branch → preview deploys** (PR #33): deploy an app against a DB branch at its own preview URL (`/_p/<slug>--<branch>/`), production untouched; the branch's **scoped** connection string is injected as `DATABASE_URL`. `POST /v1/projects/:slug/deploy-branch` + `DELETE …/preview/:branch` (ownership-gated, per-branch reaping); `deployments.branch_id`; `podkit cloud preview`; console Previews panel. (Fixed: the "active"/Current badge now tracks the latest production deploy/rollback, ignoring preview/stopped rows.)
 - **Production deploy artifacts** (PR #32): `infra/docker-compose.prod.yml` (NODE_ENV=production, secrets via `--env-file`, persistent volume, restart policy, configurable binds) + `infra/.env.example` + **`docs/DEPLOY.md`** (deploy to a Docker VM → secrets → compose up → Caddy/TLS + DNS) + `cloud:prod:up`/`down` scripts. **How to host podkit: a single Docker-capable VM today; multi-node needs the docker.sock→orchestrator rework.** Verified by booting the prod stack in production mode with real secrets.
+
+## 🚀 Release readiness checklist
+
+The user intends to release podkit. Triage of what's needed, by audience.
+
+**Done / ready:** one-click `podkit cloud deploy` (no Dockerfile/flags, zero-downtime), preview deploys per DB branch, managed Postgres + scoped roles + branching, rollback, logs, metrics, env (encrypted at rest), custom domains, ownership enforcement, token expiry+revocation, container hardening (cap-drop/no-new-privileges/non-root tenant/127.0.0.1), CORS allowlist, body/upload caps, secrets-at-rest, production compose + `docs/DEPLOY.md`, public landing + `/docs` site, 316+ tests.
+
+**Blocking a SELF-HOST / early release (do next):**
+- [ ] `podkit init` scaffolding (new-app template) + a polished getting-started in `/docs` and README.
+- [ ] TLS: document/standardize the Caddy-in-front path (DEPLOY.md has it); ACME-in-podkit later.
+- [ ] Base-image freshness: rebuild/version `podkit-base` on `@podkit/*` change (operator doc + maybe a `cloud:base:rebuild`).
+- [ ] Account lifecycle: password reset, delete account; basic email verification.
+- [ ] First-run/empty states polish; error copy pass.
+
+**Blocking a PUBLIC / untrusted multi-tenant release (heavier, several need sign-off):**
+- [ ] **docker.sock host-escape** — a tenant container breakout = host root. Needs a brokered build/run service or an orchestrator (k8s/Nomad). *(Architectural.)*
+- [ ] **Secret-injection redesign** — secrets still passed as plaintext `-e` to containers + conn string returned at create. *(Architectural.)*
+- [ ] **Per-account quotas + API rate limiting** — cap projects/containers/CPU/mem/disk per account; global request rate limits; abuse/teardown policy.
+- [ ] Domain ownership verification (DNS TXT) before routing a custom domain; per-domain TLS.
+- [ ] Billing/usage metering (later).
+- [ ] Operator observability/alerting (control-plane health, build failures, disk).
 
 ## 📋 To do — cloud hardening (toward production)
 
