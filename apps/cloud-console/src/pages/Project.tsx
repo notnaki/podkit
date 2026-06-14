@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
 import { useApi } from "../lib/useApi.ts";
 
-const TABS = ["Overview", "Deployments", "Storage", "Environment", "Settings"] as const;
+const TABS = ["Overview", "Deployments", "Storage", "Domains", "Environment", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
@@ -87,6 +87,8 @@ export function Project({ slug }: { slug: string }) {
             </div>
             <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
           </section>
+        ) : tab === "Domains" ? (
+          <Domains slug={slug} />
         ) : tab === "Environment" ? (
           <Environment slug={slug} />
         ) : (
@@ -144,6 +146,78 @@ function Deployments({ slug, dep, url, reload }: { slug: string; dep: { version:
               </tr></tbody>
             </table>
           ) : <div className="state"><strong>No deployments</strong><span>Deploy above or via <span className="mono">podkit cloud deploy {slug}</span>.</span></div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Domains({ slug }: { slug: string }) {
+  const domains = useApi(() => api.listDomains(slug), [slug]);
+  const [domain, setDomain] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const hasKey = getToken() !== "";
+  const list = domains.data?.domains ?? [];
+
+  async function add() {
+    setBusy(true); setNote(null);
+    const res = await api.addDomain(slug, domain.trim());
+    setBusy(false);
+    if (res.ok) {
+      setNote({ ok: true, text: `added ${domain.trim()}` });
+      setDomain("");
+      domains.reload();
+    } else {
+      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+    }
+  }
+
+  async function remove(d: string) {
+    setNote(null);
+    const res = await api.deleteDomain(slug, d);
+    if (res.ok) { setNote({ ok: true, text: `removed ${d}` }); domains.reload(); }
+    else setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
+  }
+
+  return (
+    <div className="stack">
+      <section className="panel">
+        <div className="panel-head"><h3>Custom domains</h3></div>
+        <div className="panel-body flush" style={{ padding: 0 }}>
+          {domains.loading ? (
+            <div className="state">Loading…</div>
+          ) : domains.error ? (
+            <div className="state"><strong>{domains.error.code}</strong><span>{domains.error.message}</span></div>
+          ) : list.length === 0 ? (
+            <div className="state"><strong>No domains</strong><span>Add one below to route a custom hostname to this project.</span></div>
+          ) : (
+            <table className="table">
+              <thead><tr><th>Domain</th><th style={{ width: 1 }} /></tr></thead>
+              <tbody>
+                {list.map((d) => (
+                  <tr key={d.domain}>
+                    <td>
+                      <a className="mono" style={{ color: "var(--link)" }} href={`https://${d.domain}`} target="_blank" rel="noreferrer">{d.domain} ↗</a>
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <button className="btn btn-ghost" disabled={!hasKey} onClick={() => remove(d.domain)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <div className="panel-foot">Point your domain&apos;s DNS (A / CNAME record) at the podkit gateway for traffic to route here.</div>
+      </section>
+      <section className="panel">
+        <div className="panel-head"><h3>Add domain</h3></div>
+        <div className="panel-body stack">
+          {!hasKey && <span className="status status-building"><span className="dot" />sign in to edit</span>}
+          <div className="field"><label>Domain</label><input className="input mono" placeholder="app.example.com" value={domain} onChange={(e) => setDomain(e.target.value)} /></div>
+          {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
+          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !domain.trim()} onClick={add}>{busy ? "Adding…" : "Add"}</button></div>
         </div>
       </section>
     </div>

@@ -113,6 +113,8 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
   // slug -> current host port of the live container for that project.
   const routeMap = new Map<string, number>();
+  // custom domain (hostname, no port) -> project slug.
+  const domainMap = new Map<string, string>();
   // names of app containers we started, so close() can tear them down.
   const runningContainers: string[] = [];
 
@@ -120,8 +122,15 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   let gatewayUrl = "";
 
   const gateway = createGateway({
-    resolve: ({ path }) => {
-      const slug = slugFromPath(path);
+    resolve: ({ host, path }) => {
+      // Path-based routing (/_p/<slug>) wins; otherwise fall back to the
+      // Host header for custom-domain routing.
+      let slug = slugFromPath(path);
+      if (!slug) {
+        // Strip any :port from the Host header before lookup.
+        const hostname = host.replace(/:\d+$/, "");
+        slug = domainMap.get(hostname) ?? null;
+      }
       if (!slug) return null;
       const hostPort = routeMap.get(slug);
       return hostPort ? { hostPort } : null;
@@ -556,6 +565,76 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
+  router.register(
+    "POST",
+    "/v1/projects/:slug/domains",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const b = (body ?? {}) as { domain?: string };
+      const domain = b.domain;
+      if (
+        typeof domain !== "string" ||
+        !/^[a-z0-9.-]+$/.test(domain) ||
+        !domain.includes(".")
+      ) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid domain",
+            "domain must match ^[a-z0-9.-]+$ and contain a dot",
+          ),
+        };
+      }
+      await store.addDomain({ projectId: project.id, domain });
+      domainMap.set(domain, slug);
+      return { status: 200, body: ok({ domain }) };
+    },
+  );
+
+  router.register("GET", "/v1/projects/:slug/domains", async ({ params }) => {
+    const slug = params.slug!;
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return {
+        status: 404,
+        body: fail("E_NOT_FOUND", "unknown project: " + slug),
+      };
+    }
+    return {
+      status: 200,
+      body: ok({ domains: await store.listDomains(project.id) }),
+    };
+  });
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/domains/:domain",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const domain = params.domain!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      await store.deleteDomain({ projectId: project.id, domain });
+      domainMap.delete(domain);
+      return { status: 200, body: ok({ deleted: domain }) };
+    },
+  );
+
   const server = createServer(
     async (req: IncomingMessage, res: ServerResponse) => {
       // CORS: the cloud console is a separate origin from the control-plane.
@@ -658,6 +737,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       gatewayPort: number;
     }): Promise<{ apiUrl: string; gatewayUrl: string }> {
       await store.migrate();
+
+      // Hydrate the in-memory domain -> slug map from persisted custom domains.
+      const allDomains = await store.listAllDomains();
+      for (const { domain, slug } of allDomains) {
+        domainMap.set(domain, slug);
+      }
 
       const gw = await gateway.listen(listenOpts.gatewayPort);
       gatewayUrl = gw.url;

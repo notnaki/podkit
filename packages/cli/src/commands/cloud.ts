@@ -86,10 +86,70 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, env, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, env, domains, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
+
+const DOMAINS_HINT =
+  "podkit cloud domains add <slug> <domain> | list <slug> | rm <slug> <domain>";
+
+async function domainsCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [action, ...domainsRest] = rest;
+
+  if (action === "add") {
+    const [slug, domain] = domainsRest;
+    if (!slug) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "domains add requires a slug", DOMAINS_HINT),
+      );
+    }
+    if (!domain) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "domains add requires a domain", DOMAINS_HINT),
+      );
+    }
+    return await callControlPlane("POST", `/v1/projects/${slug}/domains`, {
+      domain,
+    });
+  }
+
+  if (action === "list") {
+    const [slug] = domainsRest;
+    if (!slug) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "domains list requires a slug", DOMAINS_HINT),
+      );
+    }
+    return await callControlPlane("GET", `/v1/projects/${slug}/domains`);
+  }
+
+  if (action === "rm") {
+    const [slug, domain] = domainsRest;
+    if (!slug) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "domains rm requires a slug", DOMAINS_HINT),
+      );
+    }
+    if (!domain) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "domains rm requires a domain", DOMAINS_HINT),
+      );
+    }
+    return await callControlPlane(
+      "DELETE",
+      `/v1/projects/${slug}/domains/${domain}`,
+    );
+  }
+
+  return fail(
+    new PodkitError(
+      "E_BAD_ARGS",
+      action ? `Unknown domains action: ${action}` : "domains requires an action",
+      DOMAINS_HINT,
+    ),
+  );
+}
 
 async function envCommand(rest: string[]): Promise<Envelope<unknown>> {
   const [action, ...envRest] = rest;
@@ -267,6 +327,10 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
 
     if (subcommand === "env") {
       return await envCommand(rest);
+    }
+
+    if (subcommand === "domains") {
+      return await domainsCommand(rest);
     }
 
     if (subcommand === "login") {
