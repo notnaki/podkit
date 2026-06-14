@@ -60,6 +60,7 @@ The hosted multi-tenant cloud, built on real Docker and tested on a real machine
 - **Reap superseded containers** (PR #29): deploy/rollback now stops the container it replaced (after the routeMap cutover, so no dropped traffic) instead of leaking it until shutdown.
 - **Database branching** (PR #30, Supabase-class): isolated per-project Postgres branches (copy-on-create via `CREATE DATABASE … WITH TEMPLATE`), each with its own scoped non-superuser role; `project_branches` table; ownership-gated `POST/GET/DELETE /v1/projects/:slug/branches`; `podkit cloud branches`; console Branches panel in the Database tab.
 - **CI flake fix** (PR #31): the dev server gave Vite's HMR websocket a unique random port instead of the fixed 24678, killing the "Port already in use" collision that flaked the suite under parallel load.
+- **Production deploy artifacts** (PR #32): `infra/docker-compose.prod.yml` (NODE_ENV=production, secrets via `--env-file`, persistent volume, restart policy, configurable binds) + `infra/.env.example` + **`docs/DEPLOY.md`** (deploy to a Docker VM → secrets → compose up → Caddy/TLS + DNS) + `cloud:prod:up`/`down` scripts. **How to host podkit: a single Docker-capable VM today; multi-node needs the docker.sock→orchestrator rework.** Verified by booting the prod stack in production mode with real secrets.
 
 ## 📋 To do — cloud hardening (toward production)
 
