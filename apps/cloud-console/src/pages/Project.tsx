@@ -114,8 +114,8 @@ function DangerZone({ slug }: { slug: string }) {
     setBusy(true); setNote(null);
     const res = await api.deleteProject(slug);
     if (res.ok) {
-      // Project is gone — return to the projects list.
-      window.location.hash = "#/";
+      // Project is gone — return to the dashboard (projects list).
+      window.location.hash = "#/dashboard";
     } else {
       setBusy(false);
       setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
