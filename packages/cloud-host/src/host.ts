@@ -351,6 +351,22 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // slug -> name of the container currently serving it, so a new deploy/rollback
   // can reap the one it superseded (otherwise dead containers leak until close).
   const activeContainer = new Map<string, string>();
+  // Preview lifecycle is tracked separately from production: slug -> branchName
+  // -> name of the container currently serving that preview. A preview redeploy
+  // reaps only its own prior preview container, never the production one (and
+  // vice versa), so a project's prod + N branch previews coexist independently.
+  const activePreview = new Map<string, Map<string, string>>();
+
+  // Stop a container by name and forget it (best-effort, idempotent).
+  async function stopAndForget(name: string): Promise<void> {
+    const idx = runningContainers.indexOf(name);
+    if (idx !== -1) runningContainers.splice(idx, 1);
+    try {
+      await stopContainer(name);
+    } catch {
+      // Best-effort: the container may already be gone.
+    }
+  }
 
   // Make `name` the live container for `slug` and stop the one it replaced.
   // Called AFTER routeMap is switched, so the old container is already off the
@@ -359,13 +375,28 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     const prev = activeContainer.get(slug);
     activeContainer.set(slug, name);
     if (prev && prev !== name) {
-      const idx = runningContainers.indexOf(prev);
-      if (idx !== -1) runningContainers.splice(idx, 1);
-      try {
-        await stopContainer(prev);
-      } catch {
-        // Best-effort: the old container may already be gone.
-      }
+      await stopAndForget(prev);
+    }
+  }
+
+  // Preview analogue of reapSuperseded, scoped to (slug, branchName). Stops the
+  // previous preview container for that exact branch only; production and other
+  // branches are untouched. Single-threaded (Node event loop), so the nested
+  // Map mutation is race-free across concurrent preview redeploys.
+  async function reapSupersededPreview(
+    slug: string,
+    branchName: string,
+    name: string,
+  ): Promise<void> {
+    let byBranch = activePreview.get(slug);
+    if (!byBranch) {
+      byBranch = new Map<string, string>();
+      activePreview.set(slug, byBranch);
+    }
+    const prev = byBranch.get(branchName);
+    byBranch.set(branchName, name);
+    if (prev && prev !== name) {
+      await stopAndForget(prev);
     }
   }
 
@@ -392,6 +423,113 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
     record.count++;
     return true;
+  }
+
+  // Shared build+run+record+route pipeline for both production deploys and
+  // branch previews. The caller is responsible for credential/ownership checks
+  // and for validating/resolving contextDir BEFORE calling this. Production uses
+  // kind="deploy"/"rollback" + branchId=null + routeMap key <slug>; a preview
+  // uses kind="preview" + a branchId + routeMap key <slug>--<branchName>, so a
+  // preview never clobbers the production route (distinct key, port, container).
+  type DeployResult =
+    | { version: string; hostPort: number; containerName: string }
+    | { error: { status: number; code: string; message: string; hint?: string } };
+
+  async function buildAndDeploy(input: {
+    slug: string;
+    projectId: string;
+    contextDir: string;
+    appSubpath?: string;
+    containerPort: number;
+    kind: string;
+    branchId: string | null;
+    branchName?: string;
+    // Extra env merged on top of the project's env vars (e.g. the branch's
+    // scoped DATABASE_URL for a preview). These take precedence so a preview's
+    // DB conn string overrides any project-level DATABASE_URL.
+    extraEnv?: Record<string, string>;
+  }): Promise<DeployResult> {
+    const { slug, contextDir } = input;
+    const version = "v" + randomBytes(4).toString("hex");
+    const tag = "podkit-" + slug + ":" + version;
+    // Preview containers get a name that encodes the branch so they're easy to
+    // spot; production keeps the historical podkit-app-<slug>-<rand> shape.
+    const name =
+      input.kind === "preview" && input.branchName
+        ? "podkit-preview-" +
+          slug +
+          "-" +
+          input.branchName +
+          "-" +
+          randomBytes(3).toString("hex")
+        : "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
+
+    // Build the image: an explicit Dockerfile wins; otherwise, if it's a podkit
+    // app (has app/routes), the buildpack generates one — zero-config.
+    const appDir = input.appSubpath
+      ? join(contextDir, input.appSubpath)
+      : contextDir;
+    if (existsSync(join(appDir, "Dockerfile"))) {
+      await buildImage({ contextDir: appDir, tag });
+    } else if (isPodkitApp(appDir)) {
+      await buildPodkitApp({
+        repoRoot: contextDir,
+        appSubpath: input.appSubpath ?? ".",
+        tag,
+        port: input.containerPort,
+      });
+    } else {
+      return {
+        error: {
+          status: 400,
+          code: "E_BAD_ARGS",
+          message: "no Dockerfile and not a podkit app",
+          hint: "add a Dockerfile, or deploy a podkit app (with app/routes)",
+        },
+      };
+    }
+
+    // Inject the project's environment variables, then layer extraEnv on top.
+    const envRows = await store.listEnv(input.projectId);
+    const env: Record<string, string> = {};
+    for (const row of envRows) {
+      env[row.key] = row.value;
+    }
+    if (input.extraEnv) {
+      for (const [k, v] of Object.entries(input.extraEnv)) {
+        env[k] = v;
+      }
+    }
+
+    const { id, hostPort } = await runContainer({
+      image: tag,
+      name,
+      containerPort: input.containerPort,
+      env,
+    });
+    runningContainers.push(name);
+
+    await store.recordDeployment({
+      projectId: input.projectId,
+      version,
+      containerId: id,
+      hostPort,
+      status: "running",
+      containerPort: input.containerPort,
+      kind: input.kind,
+      branchId: input.branchId,
+    });
+
+    if (input.kind === "preview" && input.branchName) {
+      const routeKey = slug + "--" + input.branchName;
+      routeMap.set(routeKey, hostPort);
+      await reapSupersededPreview(slug, input.branchName, name);
+    } else {
+      routeMap.set(slug, hostPort);
+      await reapSuperseded(slug, name);
+    }
+
+    return { version, hostPort, containerName: name };
   }
 
   // Resolved once listen() binds the gateway, used to build public URLs.
@@ -568,67 +706,238 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
 
-      const version = "v" + randomBytes(4).toString("hex");
-      const tag = "podkit-" + slug + ":" + version;
-      const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
+      const result = await buildAndDeploy({
+        slug,
+        projectId: project.id,
+        contextDir,
+        appSubpath: b.appSubpath,
+        containerPort: b.containerPort,
+        kind: "deploy",
+        branchId: null,
+      });
+      if ("error" in result) {
+        return {
+          status: result.error.status,
+          body: fail(
+            result.error.code,
+            result.error.message,
+            result.error.hint,
+          ),
+        };
+      }
+      return {
+        status: 200,
+        body: ok({
+          version: result.version,
+          hostPort: result.hostPort,
+          url: gatewayUrl + "/_p/" + slug + "/",
+        }),
+      };
+    },
+  );
 
-      // Build the image: an explicit Dockerfile wins; otherwise, if it's a
-      // podkit app (has app/routes), the buildpack generates one — zero-config.
-      const appDir = b.appSubpath ? join(contextDir, b.appSubpath) : contextDir;
-      if (existsSync(join(appDir, "Dockerfile"))) {
-        await buildImage({ contextDir: appDir, tag });
-      } else if (isPodkitApp(appDir)) {
-        await buildPodkitApp({
-          repoRoot: contextDir,
-          appSubpath: b.appSubpath ?? ".",
-          tag,
-          port: b.containerPort,
-        });
-      } else {
+  // Deploy a branch as an isolated preview. Secure-by-default ladder: guard
+  // credentials, resolve the project (404), enforce ownership (401/403), then
+  // validate the branch exists FOR THIS PROJECT and inject the branch's SCOPED
+  // (non-admin) connection string as DATABASE_URL. The preview routes under
+  // <slug>--<branchName> so it never clobbers production.
+  router.register(
+    "POST",
+    "/v1/projects/:slug/deploy-branch",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const b = (body ?? {}) as {
+        branchName?: unknown;
+        contextDir?: string;
+        containerPort?: number;
+        appSubpath?: string;
+      };
+      // Reject branch names with "--" (or any invalid char): the route key joins
+      // slug + "--" + branchName, so a "--" in the branch name could collide.
+      if (!isValidBranchName(b.branchName)) {
         return {
           status: 400,
           body: fail(
             "E_BAD_ARGS",
-            "no Dockerfile and not a podkit app",
-            "add a Dockerfile, or deploy a podkit app (with app/routes)",
+            "invalid branch name",
+            "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$ (no '--')",
           ),
         };
       }
-      // Inject the project's environment variables into the container.
-      const envRows = await store.listEnv(project.id);
-      const env: Record<string, string> = {};
-      for (const row of envRows) {
-        env[row.key] = row.value;
+      const branchName = b.branchName;
+      if (!b.contextDir || typeof b.containerPort !== "number") {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "contextDir and containerPort required",
+            "POST /v1/projects/:slug/deploy-branch {branchName, contextDir, containerPort}",
+          ),
+        };
+      }
+      if (b.appSubpath !== undefined) {
+        const subpath = b.appSubpath;
+        const safe =
+          typeof subpath === "string" &&
+          subpath.length > 0 &&
+          !subpath.startsWith("/") &&
+          /^[A-Za-z0-9._/-]+$/.test(subpath) &&
+          !subpath.split("/").some((seg) => seg === "..");
+        if (!safe) {
+          return {
+            status: 400,
+            body: fail(
+              "E_BAD_ARGS",
+              "invalid appSubpath",
+              "appSubpath must be a safe relative path with no .. segments",
+            ),
+          };
+        }
+      }
+      const ctx = validateContextDir(b.contextDir, controlPlaneRoot, buildsRoot);
+      if ("error" in ctx) {
+        return {
+          status: 400,
+          body: fail(ctx.error.code, ctx.error.message, ctx.error.hint),
+        };
+      }
+      const contextDir = ctx.path;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+
+      // The branch must already exist for THIS project (scoped to projectId by
+      // the store query), so a caller can't preview-deploy against another
+      // tenant's branch or a non-existent one.
+      const branch = await store.getBranchByName(project.id, branchName);
+      if (!branch) {
+        return {
+          status: 404,
+          body: fail(
+            "E_NOT_FOUND",
+            "unknown branch: " + branchName,
+            "create it first: podkit cloud branches create " + slug + " " + branchName,
+          ),
+        };
+      }
+      // Retrieve the decrypted SCOPED branch connection string (never admin).
+      const branchConn = await store.getBranchConnectionString(branch.id);
+      if (!branchConn) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BRANCH_FAILED",
+            "branch has no stored connection string",
+            "re-create the branch",
+          ),
+        };
       }
 
-      const { id, hostPort } = await runContainer({
-        image: tag,
-        name,
-        containerPort: b.containerPort,
-        env,
-      });
-      runningContainers.push(name);
-
-      await store.recordDeployment({
+      const result = await buildAndDeploy({
+        slug,
         projectId: project.id,
-        version,
-        containerId: id,
-        hostPort,
-        status: "running",
+        contextDir,
+        appSubpath: b.appSubpath,
         containerPort: b.containerPort,
-        kind: "deploy",
+        kind: "preview",
+        branchId: branch.id,
+        branchName,
+        // Inject the branch's scoped DB conn string as DATABASE_URL; this layers
+        // on top of the project's env vars and overrides any project DATABASE_URL.
+        extraEnv: { DATABASE_URL: branchConn },
       });
-      routeMap.set(slug, hostPort);
-      await reapSuperseded(slug, name);
-
+      if ("error" in result) {
+        return {
+          status: result.error.status,
+          body: fail(
+            result.error.code,
+            result.error.message,
+            result.error.hint,
+          ),
+        };
+      }
+      const routeKey = slug + "--" + branchName;
       return {
         status: 200,
         body: ok({
-          version,
-          hostPort,
-          url: gatewayUrl + "/_p/" + slug + "/",
+          version: result.version,
+          hostPort: result.hostPort,
+          branchName,
+          url: gatewayUrl + "/_p/" + routeKey + "/",
         }),
       };
+    },
+  );
+
+  // Tear down an active branch preview: stop its container, clear the preview
+  // route, and append a kind="stopped" deployment marker. Idempotent — a missing
+  // route/container is a no-op, so a partially-failed prior teardown is safe to
+  // retry. Secure-by-default: guard -> 404 -> ownership.
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/preview/:branchName",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const branchName = params.branchName!;
+      if (!isValidBranchName(branchName)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid branch name",
+            "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$",
+          ),
+        };
+      }
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "unknown project: " + slug),
+        };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+
+      const branch = await store.getBranchByName(project.id, branchName);
+      // Stop the live preview container for this branch (tracked in-memory).
+      const byBranch = activePreview.get(slug);
+      const containerName = byBranch?.get(branchName);
+      if (containerName) {
+        await stopAndForget(containerName);
+        byBranch!.delete(branchName);
+      }
+      // Clear the preview route (no-op if absent).
+      routeMap.delete(slug + "--" + branchName);
+
+      // Record a teardown marker so deployment history reflects the stop.
+      const preview = (await store.listDeployments(project.id))
+        .filter((d) => d.kind === "preview" && branch && d.branchId === branch.id)
+        .pop();
+      if (preview) {
+        await store.recordDeployment({
+          projectId: project.id,
+          version: preview.version,
+          containerId: "",
+          hostPort: 0,
+          status: "stopped",
+          containerPort: preview.containerPort,
+          kind: "stopped",
+          branchId: branch ? branch.id : null,
+        });
+      }
+
+      return { status: 200, body: ok({ stopped: branchName }) };
     },
   );
 
@@ -893,6 +1202,16 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         // Ignore: database may have never been provisioned or already dropped.
       }
 
+      // Stop any live branch-preview containers and drop their routes.
+      const previews = activePreview.get(slug);
+      if (previews) {
+        for (const [branchName, containerName] of previews) {
+          await stopAndForget(containerName);
+          routeMap.delete(slug + "--" + branchName);
+        }
+        activePreview.delete(slug);
+      }
+
       // Drop in-memory routing state for this project.
       routeMap.delete(slug);
       activeContainer.delete(slug);
@@ -921,10 +1240,20 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     const access = await authorizeProject(headers, project);
     if (access === "unauth") return unauthorized();
     if (access === "forbidden") return forbidden();
-    // store returns oldest-first; the most recent is the live/active one.
+    // store returns oldest-first. "Active" is the production deployment serving
+    // the project, i.e. the most recent deploy/rollback — NOT simply the last
+    // row: preview (kind="preview") and teardown (kind="stopped") rows are
+    // appended to the same history but never own the production route, so they
+    // must not steal the "Current" badge. Scan newest -> oldest for a prod kind.
     const deployments = await store.listDeployments(project.id);
-    const activeId =
-      deployments.length > 0 ? deployments[deployments.length - 1]!.id : null;
+    let activeId: string | null = null;
+    for (let i = deployments.length - 1; i >= 0; i--) {
+      const d = deployments[i]!;
+      if (d.kind === "deploy" || d.kind === "rollback") {
+        activeId = d.id;
+        break;
+      }
+    }
     // Present newest-first and flag which one is currently serving traffic.
     const items = deployments
       .slice()
@@ -934,6 +1263,9 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         version: d.version,
         status: d.status,
         kind: d.kind,
+        // branchId is present only for preview deployments; omitted (null) for
+        // production deploy/rollback rows.
+        branchId: d.branchId,
         createdAt: d.createdAt,
         active: d.id === activeId,
       }));
@@ -1278,12 +1610,13 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   router.register(
     "POST",
     "/v1/projects/:slug/db/query",
-    async ({ headers, params, body }) => {
+    async ({ headers, params, body, query }) => {
       // Read-only SQL runner. Same guard ladder as the logs/env handlers: the
       // mutation guard runs first so unauthenticated callers can't probe project
       // existence via 404s, then ownership is enforced. The query itself runs as
-      // the per-project SCOPED non-superuser role (never adminConnectionString),
-      // so even a parser bypass cannot reach another tenant's database.
+      // the per-project (or per-branch) SCOPED non-superuser role (never
+      // adminConnectionString), so even a parser bypass cannot reach another
+      // tenant's database.
       if (!(await guardMutation(headers))) return unauthorized();
       const slug = params.slug!;
       const project = await store.getProjectBySlug(slug);
@@ -1296,6 +1629,21 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       const access = await authorizeProject(headers, project);
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
+
+      // Optional ?branchName=<name> targets a branch's isolated DB. When set, we
+      // use the branch's SCOPED conn string (not the project's, never admin), so
+      // the query is confined to that branch's database.
+      const branchNameParam = query.get("branchName");
+      if (branchNameParam !== null && !isValidBranchName(branchNameParam)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid branch name",
+            "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$",
+          ),
+        };
+      }
 
       const b = (body ?? {}) as { sql?: unknown; params?: unknown };
       if (typeof b.sql !== "string" || b.sql.trim().length === 0) {
@@ -1352,14 +1700,30 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       // persist it (a one-time rotation), then reuse thereafter.
       let scopedConnectionString: string | null;
       try {
-        scopedConnectionString = await store.getProjectDbUrl(project.id);
-        if (!scopedConnectionString) {
-          const provisioned = await provisionDatabase({
-            adminConnectionString: opts.adminConnectionString,
-            slug,
-          });
-          scopedConnectionString = provisioned.connectionString;
-          await store.setProjectDbUrl(project.id, scopedConnectionString);
+        if (branchNameParam !== null) {
+          // Branch-targeted query: resolve the branch (scoped to this project),
+          // then use its decrypted scoped conn string. Never falls back to the
+          // project/admin DB, so isolation is preserved.
+          const branch = await store.getBranchByName(project.id, branchNameParam);
+          if (!branch) {
+            return {
+              status: 404,
+              body: fail("E_NOT_FOUND", "unknown branch: " + branchNameParam),
+            };
+          }
+          scopedConnectionString = await store.getBranchConnectionString(
+            branch.id,
+          );
+        } else {
+          scopedConnectionString = await store.getProjectDbUrl(project.id);
+          if (!scopedConnectionString) {
+            const provisioned = await provisionDatabase({
+              adminConnectionString: opts.adminConnectionString,
+              slug,
+            });
+            scopedConnectionString = provisioned.connectionString;
+            await store.setProjectDbUrl(project.id, scopedConnectionString);
+          }
         }
       } catch {
         return {

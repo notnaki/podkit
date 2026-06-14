@@ -115,7 +115,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug>, url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
 
 const ENV_HINT =
   "podkit cloud env set <slug> KEY=VALUE | list <slug> | rm <slug> KEY";
@@ -125,6 +125,87 @@ const DOMAINS_HINT =
 
 const BRANCHES_HINT =
   "podkit cloud branches list <slug> | create <slug> <name> | rm <slug> <name>";
+
+const PREVIEW_HINT =
+  "podkit cloud preview <slug> <branchName> [--contextDir=<dir>] [--containerPort=<port>] | preview list <slug>";
+
+// Parse a `--flag=value` style option out of an argv slice. Returns null when
+// the flag is absent or has no value.
+function parseFlag(args: string[], flag: string): string | null {
+  const prefix = flag + "=";
+  for (const arg of args) {
+    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+  }
+  return null;
+}
+
+async function previewCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [first, ...previewRest] = rest;
+
+  // `preview list <slug>` -> show this project's preview deployments.
+  if (first === "list") {
+    const [slug] = previewRest;
+    if (!slug) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "preview list requires a slug", PREVIEW_HINT),
+      );
+    }
+    const res = await callControlPlane(
+      "GET",
+      `/v1/projects/${slug}/deployments`,
+    );
+    if (res.ok) {
+      const data = res.data as any;
+      const list = Array.isArray(data?.deployments) ? data.deployments : [];
+      const previews = list.filter((d: any) => d?.kind === "preview");
+      const rows: Record<string, string>[] = previews.map((d: any) => ({
+        branchId: String(d?.branchId ?? ""),
+        version: String(d?.version ?? ""),
+        status: String(d?.status ?? ""),
+        createdAt: String(d?.createdAt ?? ""),
+      }));
+      return ok(formatTable(rows));
+    }
+    return res;
+  }
+
+  // `preview <slug> <branchName> [--contextDir=...] [--containerPort=...]`
+  const slug = first;
+  const [branchName] = previewRest;
+  if (!slug) {
+    return fail(
+      new PodkitError("E_BAD_ARGS", "preview requires a slug", PREVIEW_HINT),
+    );
+  }
+  if (!branchName) {
+    return fail(
+      new PodkitError(
+        "E_BAD_ARGS",
+        "preview requires a branchName",
+        PREVIEW_HINT,
+      ),
+    );
+  }
+  const contextDir = parseFlag(rest, "--contextDir") ?? process.cwd();
+  const portStr = parseFlag(rest, "--containerPort");
+  const containerPort = portStr
+    ? Number(portStr)
+    : Number(process.env.PODKIT_APP_PORT ?? 3000);
+  if (!Number.isInteger(containerPort) || containerPort < 1) {
+    return fail(
+      new PodkitError(
+        "E_BAD_ARGS",
+        "--containerPort must be a positive integer",
+        PREVIEW_HINT,
+      ),
+    );
+  }
+  return await callControlPlane(
+    "POST",
+    `/v1/projects/${slug}/deploy-branch`,
+    { branchName, contextDir, containerPort },
+  );
+}
 
 async function domainsCommand(rest: string[]): Promise<Envelope<unknown>> {
   const [action, ...domainsRest] = rest;
@@ -568,6 +649,10 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
 
     if (subcommand === "branches") {
       return await branchesCommand(rest);
+    }
+
+    if (subcommand === "preview") {
+      return await previewCommand(rest);
     }
 
     if (subcommand === "login") {
