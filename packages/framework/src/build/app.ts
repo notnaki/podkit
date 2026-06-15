@@ -1,7 +1,7 @@
 import { build as viteBuild } from "vite";
 import react from "@vitejs/plugin-react";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
 import { buildRouteTable } from "../routing/discover.ts";
 import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
 
@@ -16,8 +16,17 @@ function listFiles(dir: string, root = dir): string[] {
   return out;
 }
 
-/** Dependencies that must stay external to the SSR bundle (resolved at runtime). */
-const SSR_EXTERNAL = ["react", "react-dom", "react-dom/server", "react/jsx-runtime"];
+/**
+ * Keep every bare (node_modules / node:) import external to the SSR bundle, so
+ * only the app's own source (relative/absolute imports) is bundled. This is
+ * standard SSR behavior: server dependencies — react, @podkit/*, and crucially
+ * native/CJS/wasm packages like `pg`, `pglite`, and `drizzle-orm` that a route's
+ * loader/action pulls in via `@podkit/db`/`@podkit/auth` — are resolved from
+ * node_modules at runtime instead of being bundled (bundling them would break).
+ */
+function isBareImport(id: string): boolean {
+  return !id.startsWith(".") && !id.startsWith("\0") && !isAbsolute(id);
+}
 
 /**
  * Map a source route file to a filesystem-safe SSR output slug. Rollup/Vite
@@ -108,7 +117,7 @@ export async function buildApp(
         manifest: false,
         rollupOptions: {
           input: routeInputs,
-          external: SSR_EXTERNAL,
+          external: (id: string) => isBareImport(id),
           output: {
             format: "es",
             entryFileNames: "[name].js",
