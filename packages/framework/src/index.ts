@@ -9,4 +9,4 @@ export { readManifest, writeManifest } from "./build/manifest.ts";
 export type { BuildAppOptions, BuildAppResult } from "./build/app.ts";
 export type { BuildManifest, BuildManifestRoute } from "./build/manifest.ts";
 export type { ProdServerOptions } from "./server/prod-server.ts";
-export type { Route, RouteKind, LoaderContext } from "./types.ts";
+export type { Route, RouteKind, LoaderContext, PageProps, LoaderData } from "./types.ts";

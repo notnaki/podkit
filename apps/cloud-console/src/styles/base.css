@@ -413,6 +413,38 @@ h3 { font-size: var(--t-md); font-weight: 600; letter-spacing: -0.015em; }
 .docs-table td:first-child { white-space: nowrap; color: var(--text); }
 .docs-table td code { background: var(--bg); }
 
+/* Callout — full hairline + faint surface tint (no accent side-stripe). */
+.docs-note {
+  margin: var(--space-md) 0 var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+}
+.docs-note code { background: var(--bg); }
+
+/* REST API tables: let endpoint paths wrap instead of forcing wide columns. */
+.api-table td:first-child { white-space: normal; }
+.docs-method {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  margin-right: var(--space-2xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+.docs-method.m-get { color: var(--ready); border-color: var(--ready-quiet); background: var(--ready-quiet); }
+.docs-method.m-post { color: var(--link); border-color: oklch(0.7 0.15 250 / 0.2); background: oklch(0.7 0.15 250 / 0.12); }
+.docs-method.m-delete { color: var(--error); border-color: var(--error-quiet); background: var(--error-quiet); }
+
 @media (max-width: 880px) {
   .docs { grid-template-columns: 1fr; gap: var(--space-lg); }
   .docs-side { position: static; }
