@@ -47,12 +47,15 @@ function tpl(name: string): Record<string, string> {
       `hydrateRoot(root, root.firstElementChild as never);\n`,
 
     "app/routes/index.tsx":
-      `// A route module: optional loader(ctx) runs on the server, its return value\n` +
-      `// is passed to the default component as { data } and hydrated on the client.\n` +
-      `export function loader({ url }: { url: URL }) {\n` +
+      `// A route module: optional loader(ctx) runs on the server, and its return\n` +
+      `// value is passed to the default component as the { data } prop.\n` +
+      `// PageProps<LoaderData<typeof loader>> keeps the component's data in sync\n` +
+      `// with the loader's return type — no manual prop type to maintain.\n` +
+      `import type { LoaderContext, PageProps, LoaderData } from "@podkit/framework";\n\n` +
+      `export function loader({ url }: LoaderContext) {\n` +
       `  return { name: ${JSON.stringify(name)}, path: url.pathname };\n` +
       `}\n\n` +
-      `export default function Home({ data }: { data: { name: string; path: string } }) {\n` +
+      `export default function Home({ data }: PageProps<LoaderData<typeof loader>>) {\n` +
       `  return (\n` +
       `    <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 640, margin: "8vh auto", padding: "0 20px" }}>\n` +
       `      <h1>{data.name}</h1>\n` +
@@ -81,6 +84,8 @@ function tpl(name: string): Record<string, string> {
       `# ${name}\n\n` +
       `A [podkit](https://github.com/notnaki/podkit) app — file-based routing + React SSR,\n` +
       `with a managed Postgres and one-command deploys.\n\n` +
+      `Full docs: run \`podkit docs\` for CLI topics, or open the **Docs** page in your\n` +
+      `control-plane console (the \`#/docs\` route).\n\n` +
       `## Develop\n\n` +
       "```sh\n" +
       `pnpm install   # resolves @podkit/* (see note below)\n` +
