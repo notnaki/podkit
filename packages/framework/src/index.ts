@@ -1,6 +1,6 @@
 export { buildRouteTable } from "./routing/discover.ts";
 export { matchRoute } from "./routing/match.ts";
-export { runLoader } from "./loader/run.ts";
+export { runLoader, runAction } from "./loader/run.ts";
 export { renderPage } from "./render/ssr.ts";
 export { createDevServer } from "./server/dev-server.ts";
 export { createProdServer } from "./server/prod-server.ts";
@@ -9,4 +9,5 @@ export { readManifest, writeManifest } from "./build/manifest.ts";
 export type { BuildAppOptions, BuildAppResult } from "./build/app.ts";
 export type { BuildManifest, BuildManifestRoute } from "./build/manifest.ts";
 export type { ProdServerOptions } from "./server/prod-server.ts";
-export type { Route, RouteKind, LoaderContext, PageProps, LoaderData } from "./types.ts";
+export type { Route, RouteKind, LoaderContext, ActionContext, ActionResult, PageProps, LoaderData } from "./types.ts";
+export type { CookieDirective } from "./request/cookie.ts";

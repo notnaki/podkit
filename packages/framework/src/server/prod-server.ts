@@ -9,6 +9,7 @@ import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
 import { renderPage } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
+import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
 import { readManifest } from "../build/manifest.ts";
 import type { Route } from "../types.ts";
@@ -124,6 +125,11 @@ export async function createProdServer(opts: ProdServerOptions) {
         // @vite-ignore — these are pre-built ESM files imported via Node's loader.
         mod = (await import(pathToFileURL(modPath).href)) as RouteModule;
         moduleCache.set(serverFile, mod);
+      }
+      const method = req.method ?? "GET";
+      if (method !== "GET" && method !== "HEAD") {
+        status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
+        return;
       }
       const data = await runLoader(mod, { params: m.params, url, auth });
       const html = await renderPage(mod, data, manifest.clientEntry);

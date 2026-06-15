@@ -11,6 +11,7 @@ import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
 import { renderPage } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
+import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
 import type { RouteModule } from "../loader/run.ts";
 
@@ -80,6 +81,11 @@ export async function createDevServer(opts: DevServerOptions) {
           return;
         }
         const mod = (await vite.ssrLoadModule(join(routesDir, m.route.file))) as RouteModule;
+        const method = req.method ?? "GET";
+        if (method !== "GET" && method !== "HEAD") {
+          status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
+          return;
+        }
         const data = await runLoader(mod, { params: m.params, url, auth });
         const html = await renderPage(mod, data, clientEntry);
         status = 200;

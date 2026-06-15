@@ -38,6 +38,44 @@ describe("dev server", () => {
   });
 });
 
+describe("dev server — actions", () => {
+  it("runs a route's action on POST: 303 redirect + Set-Cookie", async () => {
+    const res = await fetch(`${base}/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "message=hello+world%21",
+      redirect: "manual",
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/echo?said=hello%20world!");
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("podkit_echo=hello%20world!");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
+  });
+
+  it("the loader reads the redirected query on the follow-up GET", async () => {
+    const res = await fetch(`${base}/echo?said=greetings`);
+    const body = await res.text();
+    expect(body).toContain("said: greetings");
+  });
+
+  it("returns 405 for a non-GET request to a route without an action", async () => {
+    const res = await fetch(`${base}/about`, { method: "POST", redirect: "manual" });
+    expect(res.status).toBe(405);
+  });
+
+  it("returns 413 when the body exceeds the 1 MiB cap", async () => {
+    const res = await fetch(`${base}/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "message=" + "x".repeat(1024 * 1024 + 16),
+      redirect: "manual",
+    });
+    expect(res.status).toBe(413);
+  });
+});
+
 describe("dev server — empty routes dir", () => {
   it("resolves with routeCount === 0 and does not throw when app/routes is missing", async () => {
     const emptyRoot = mkdtempSync(tmpdir() + "/podkit-test-");

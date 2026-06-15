@@ -19,7 +19,7 @@ let clientEntry: string;
 
 beforeAll(async () => {
   const result = await buildApp(appRoot, buildDir);
-  expect(result.routeCount).toBe(5);
+  expect(result.routeCount).toBe(6);
   expect(result.clientEntry).toMatch(/^\/client\/entry-[A-Za-z0-9_-]+\.js$/);
   clientEntry = result.clientEntry;
   server = await createProdServer({ appRoot, buildDir, port: 0 });
@@ -81,6 +81,23 @@ describe("prod server", () => {
     const built = readFileSync(join(buildDir, "build-manifest.json"), "utf8");
     expect(built).not.toContain("ssrLoadModule");
   });
+
+  it("runs a pre-compiled route's action on POST: 303 + Set-Cookie", async () => {
+    const res = await fetch(`${base}/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "message=prod%20ok",
+      redirect: "manual",
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("/echo?said=prod%20ok");
+    expect(res.headers.get("set-cookie") ?? "").toContain("podkit_echo=prod%20ok");
+  });
+
+  it("returns 405 for a non-GET request to a route without an action", async () => {
+    const res = await fetch(`${base}/about`, { method: "POST", redirect: "manual" });
+    expect(res.status).toBe(405);
+  });
 });
 
 describe("prod build output", () => {
@@ -88,7 +105,7 @@ describe("prod build output", () => {
     const manifest = JSON.parse(
       readFileSync(join(buildDir, "build-manifest.json"), "utf8"),
     ) as { routes: { serverFile: string }[] };
-    expect(manifest.routes).toHaveLength(5);
+    expect(manifest.routes).toHaveLength(6);
     for (const route of manifest.routes) {
       const mod = readFileSync(join(buildDir, "server", route.serverFile), "utf8");
       expect(mod.length).toBeGreaterThan(0);

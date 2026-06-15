@@ -42,7 +42,14 @@ export const extractToken = (
       if (eq === -1) continue;
       const key = pair.slice(0, eq).trim();
       if (key === "podkit_session") {
-        return pair.slice(eq + 1).trim();
+        const raw = pair.slice(eq + 1).trim();
+        // Cookie values are percent-encoded on write (see serializeCookie), so
+        // decode here. Fall back to the raw value if it isn't valid encoding.
+        try {
+          return decodeURIComponent(raw);
+        } catch {
+          return raw;
+        }
       }
     }
   }
