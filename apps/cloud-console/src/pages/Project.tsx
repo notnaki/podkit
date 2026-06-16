@@ -3,7 +3,7 @@ import { api, getToken, type Branch } from "../api/client.ts";
 import { useApi, relativeTime } from "../lib/useApi.ts";
 import { DataEditor } from "./DataEditor.tsx";
 
-const TABS = ["Overview", "Deployments", "Logs", "Metrics", "Database", "Domains", "Environment", "Settings"] as const;
+const TABS = ["Overview", "Deployments", "Database", "Observability", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
@@ -80,24 +80,25 @@ export function Project({ slug }: { slug: string }) {
           </div>
         ) : tab === "Deployments" ? (
           <Deployments slug={slug} url={url} reload={detail.reload} />
-        ) : tab === "Logs" ? (
-          <Logs slug={slug} />
-        ) : tab === "Metrics" ? (
-          <Metrics slug={slug} />
         ) : tab === "Database" ? (
           <Database slug={slug} />
-        ) : tab === "Domains" ? (
-          <Domains slug={slug} />
-        ) : tab === "Environment" ? (
-          <Environment slug={slug} />
+        ) : tab === "Observability" ? (
+          <div className="stack">
+            <Logs slug={slug} />
+            <Metrics slug={slug} />
+          </div>
         ) : (
-          <section className="panel">
-            <div className="panel-head"><h3>Settings</h3></div>
-            <div className="panel-body stack">
-              <dl className="kv"><dt>Project ID</dt><dd className="mono faint" style={{ wordBreak: "break-all" }}>{detail.data?.project.id}</dd></dl>
-              <DangerZone slug={slug} />
-            </div>
-          </section>
+          <div className="stack">
+            <Domains slug={slug} />
+            <Environment slug={slug} />
+            <section className="panel">
+              <div className="panel-head"><h3>Danger zone</h3></div>
+              <div className="panel-body stack">
+                <dl className="kv"><dt>Project ID</dt><dd className="mono faint" style={{ wordBreak: "break-all" }}>{detail.data?.project.id}</dd></dl>
+                <DangerZone slug={slug} />
+              </div>
+            </section>
+          </div>
         )}
       </main>
     </>
