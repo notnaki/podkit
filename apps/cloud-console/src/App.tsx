@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api, getApiUrl, setApiUrl, getToken, clearToken } from "./api/client.ts";
+import { api, getToken, clearToken } from "./api/client.ts";
 import type { Account } from "./api/client.ts";
 import { useApi } from "./lib/useApi.ts";
 import { Projects } from "./pages/Projects.tsx";
@@ -187,7 +187,6 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
           {health.loading ? "connecting" : connected ? "control-plane" : "offline"}
         </span>
         {account && <span className="muted mono" style={{ fontSize: "var(--t-sm)" }}>{account.email}</span>}
-        <Connect onSaved={() => location.reload()} />
         <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>
       </header>
 
@@ -202,23 +201,3 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
   );
 }
 
-function Connect({ onSaved }: { onSaved: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [url, setUrl] = useState(getApiUrl());
-  return (
-    <div style={{ position: "relative" }}>
-      <button className="btn btn-sm" onClick={() => setOpen((o) => !o)}>{open ? "Close" : "Connect"}</button>
-      {open && (
-        <div className="popover panel rise">
-          <div className="panel-body" style={{ display: "grid", gap: "var(--space-sm)" }}>
-            <div className="field">
-              <label>Control-plane URL</label>
-              <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} />
-            </div>
-            <button className="btn btn-invert" onClick={() => { setApiUrl(url); onSaved(); }}>Save & reconnect</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

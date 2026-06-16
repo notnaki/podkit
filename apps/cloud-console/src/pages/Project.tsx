@@ -168,20 +168,10 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
 
 function Deployments({ slug, url, reload }: { slug: string; url: string | null; reload: () => void }) {
   const history = useApi(() => api.listDeployments(slug), [slug]);
-  const [busy, setBusy] = useState(false);
-  const [ctx, setCtx] = useState("");
   const [rolling, setRolling] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const hasKey = getToken() !== "";
   const list = history.data?.deployments ?? [];
-
-  async function deploy() {
-    setBusy(true); setNote(null);
-    const res = await api.deployProject(slug, ctx.trim(), 3000);
-    setBusy(false);
-    if (res.ok) { setNote({ ok: true, text: `deployed ${res.data.version}` }); setCtx(""); history.reload(); reload(); }
-    else setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
-  }
 
   async function rollback(id: string, version: string) {
     setRolling(id); setNote(null);
@@ -196,11 +186,11 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
       <section className="panel">
         <div className="panel-head"><h3>Deploy</h3></div>
         <div className="panel-body stack">
-          {!hasKey && <span className="status status-building"><span className="dot" />sign in to deploy</span>}
-          <div className="field"><label>Build context (path to the app)</label><input className="input mono" placeholder="/abs/path/to/app" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
+          <p className="muted" style={{ maxWidth: "60ch", margin: 0 }}>Deploy from your project directory — no path, port, or Dockerfile to configure:</p>
+          <div className="mono" style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "8px" }}>$ podkit cloud deploy {slug}</div>
           {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
-          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !ctx.trim()} onClick={deploy}>{busy ? "Building…" : "Deploy"}</button></div>
         </div>
+        <div className="panel-foot">Deploys are immutable; each one reroutes the URL instantly — roll back below.</div>
       </section>
       <section className="panel">
         <div className="panel-head">
@@ -270,12 +260,7 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
   const branches = useApi(() => api.listBranches(slug), [slug]);
   const previews = useApi(() => api.listPreviewDeployments(slug), [slug]);
   const [branchName, setBranchName] = useState("");
-  const [ctx, setCtx] = useState("");
-  const [port, setPort] = useState("3000");
-  const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  // The full preview URL returned by the most recent successful deploy.
-  const [lastUrl, setLastUrl] = useState<{ branchName: string; url: string } | null>(null);
   const [pending, setPending] = useState<{ branchName: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const hasKey = getToken() !== "";
@@ -287,22 +272,6 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
   const nameById = new Map<string, string>();
   for (const b of branchList) nameById.set(b.id, b.name);
   const gatewayBase = gatewayBaseFrom(url);
-  const portNum = parseInt(port, 10);
-  const portValid = Number.isInteger(portNum) && portNum > 0 && portNum <= 65535;
-
-  async function deploy() {
-    if (!branchName || !ctx.trim() || !portValid) return;
-    setBusy(true); setNote(null); setLastUrl(null);
-    const res = await api.deployPreview(slug, branchName, ctx.trim(), portNum);
-    setBusy(false);
-    if (res.ok) {
-      setNote({ ok: true, text: `deployed ${res.data.branchName} ${res.data.version}` });
-      setLastUrl({ branchName: res.data.branchName, url: res.data.url });
-      previews.reload();
-    } else {
-      setNote({ ok: false, text: `${res.error.code}: ${res.error.message}` });
-    }
-  }
 
   async function confirmDelete() {
     if (!pending) return;
@@ -311,7 +280,6 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
     setDeleting(false);
     if (res.ok) {
       setNote({ ok: true, text: `stopped ${pending.branchName}` });
-      if (lastUrl && lastUrl.branchName === pending.branchName) setLastUrl(null);
       setPending(null);
       previews.reload();
     } else {
@@ -325,7 +293,7 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
       <section className="panel">
         <div className="panel-head"><h3>Deploy preview</h3></div>
         <div className="panel-body stack">
-          {!hasKey && <span className="status status-building"><span className="dot" />sign in to deploy previews</span>}
+          <p className="muted" style={{ maxWidth: "60ch", margin: 0 }}>Pick a branch, then deploy a preview from your project directory with the CLI:</p>
           <div className="field">
             <label>Branch</label>
             <select
@@ -338,21 +306,12 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
               {branchList.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
             </select>
           </div>
-          <div className="field"><label>Build context (path to the app)</label><input className="input mono" placeholder="/abs/path/to/app" value={ctx} onChange={(e) => setCtx(e.target.value)} /></div>
-          <div className="field"><label>Container port</label><input className="input mono" type="number" min={1} max={65535} placeholder="3000" value={port} onChange={(e) => setPort(e.target.value)} style={{ width: 120 }} /></div>
+          <div className="mono" style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "8px" }}>
+            $ podkit cloud preview {slug} {branchName || "<branch>"}
+          </div>
           {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
-          {lastUrl && (
-            <div className="field">
-              <label>Preview URL for <span className="mono">{lastUrl.branchName}</span></label>
-              <div className="row" style={{ gap: "var(--space-sm)", alignItems: "center", flexWrap: "wrap" }}>
-                <a className="mono" style={{ color: "var(--link)" }} href={lastUrl.url} target="_blank" rel="noreferrer">{lastUrl.url} ↗</a>
-                <CopyButton value={lastUrl.url} label="Copy" />
-              </div>
-            </div>
-          )}
-          <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !branchName || !ctx.trim() || !portValid} onClick={deploy}>{busy ? "Building…" : "Deploy preview"}</button></div>
         </div>
-        <div className="panel-foot">Each preview runs an isolated container routed under <span className="mono">{slug}--&lt;branch&gt;</span> with the branch&apos;s scoped database injected.</div>
+        <div className="panel-foot">Each preview gets its own URL at <span className="mono">{slug}--&lt;branch&gt;</span> with the branch&apos;s scoped database injected.</div>
       </section>
 
       <section className="panel">

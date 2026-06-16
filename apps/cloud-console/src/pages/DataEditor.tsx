@@ -182,54 +182,63 @@ export function DataEditor({ slug }: { slug: string }) {
                 ) : shown.length === 0 ? (
                   <div className="state"><strong>No rows</strong><span>This table is empty.</span></div>
                 ) : (
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        {cols.map((c) => <th key={c.name} className="mono">{c.name}</th>)}
-                        {canEdit && <th style={{ width: 1 }} />}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {shown.map((r, i) => {
-                        const pkVals: Record<string, unknown> = {};
-                        for (const k of pkCols) pkVals[k] = r[k];
-                        const isConfirming = confirmDel !== null && pkCols.every((k) => confirmDel[k] === r[k]);
-                        return (
-                          <tr key={i}>
-                            {cols.map((c) => {
-                              const v = r[c.name];
-                              const display = v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v);
-                              return (
-                                <td
-                                  key={c.name}
-                                  className="mono"
-                                  title={display}
-                                  style={{ maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                                >
-                                  {display}
+                  // Scroll the table horizontally WITHIN the panel — wide tables
+                  // (uuids etc.) must never overflow the page or the card.
+                  <div style={{ overflowX: "auto" }}>
+                    <table className="table" style={{ width: "100%" }}>
+                      <thead>
+                        <tr>
+                          {cols.map((c) => (
+                            <th key={c.name} className="mono" style={{ whiteSpace: "nowrap" }}>
+                              {c.name}
+                              {c.isPk ? <span className="faint"> · pk</span> : null}
+                            </th>
+                          ))}
+                          {canEdit && <th style={{ width: 1, textAlign: "right" }}>{" "}</th>}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shown.map((r, i) => {
+                          const pkVals: Record<string, unknown> = {};
+                          for (const k of pkCols) pkVals[k] = r[k];
+                          const isConfirming = confirmDel !== null && pkCols.every((k) => confirmDel[k] === r[k]);
+                          return (
+                            <tr key={i}>
+                              {cols.map((c) => {
+                                const v = r[c.name];
+                                const display = v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v);
+                                return (
+                                  <td
+                                    key={c.name}
+                                    className="mono"
+                                    title={display}
+                                    style={{ maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                  >
+                                    {display}
+                                  </td>
+                                );
+                              })}
+                              {canEdit && (
+                                <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
+                                  {isConfirming ? (
+                                    <>
+                                      <button className="btn btn-sm btn-danger" onClick={() => del(pkVals)}>Confirm</button>{" "}
+                                      <button className="btn btn-sm" onClick={() => setConfirmDel(null)}>Cancel</button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <button className="btn btn-sm" onClick={() => startEdit(r)}>Edit</button>{" "}
+                                      <button className="btn btn-sm" onClick={() => setConfirmDel(pkVals)}>Delete</button>
+                                    </>
+                                  )}
                                 </td>
-                              );
-                            })}
-                            {canEdit && (
-                              <td style={{ whiteSpace: "nowrap" }}>
-                                {isConfirming ? (
-                                  <>
-                                    <button className="btn btn-danger" onClick={() => del(pkVals)}>Confirm</button>{" "}
-                                    <button className="btn" onClick={() => setConfirmDel(null)}>Cancel</button>
-                                  </>
-                                ) : (
-                                  <>
-                                    <button className="btn" onClick={() => startEdit(r)}>Edit</button>{" "}
-                                    <button className="btn" onClick={() => setConfirmDel(pkVals)}>Delete</button>
-                                  </>
-                                )}
-                              </td>
-                            )}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                              )}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             </>
