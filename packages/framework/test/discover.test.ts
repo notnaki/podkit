@@ -23,4 +23,16 @@ describe("buildRouteTable", () => {
       { pattern: "/dashboard", kind: "static", file: "dashboard/index.tsx", params: [] },
     ]);
   });
+
+  it("ignores dotfiles and macOS AppleDouble sidecars (._*)", () => {
+    const table = buildRouteTable([
+      "index.tsx",
+      "._index.tsx", // AppleDouble sidecar from a macOS-made tarball
+      ".keep.tsx",
+      "blog/._post.tsx",
+    ]);
+    expect(table).toEqual([
+      { pattern: "/", kind: "static", file: "index.tsx", params: [] },
+    ]);
+  });
 });

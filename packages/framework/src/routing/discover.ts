@@ -6,7 +6,11 @@ export function buildRouteTable(files: string[]): Route[] {
     if (!/\.(tsx|jsx)$/.test(file)) continue;
     const base = file.replace(/\.(tsx|jsx)$/, "");
     const segments = base.split("/");
-    if (segments.some((s) => s.startsWith("_"))) continue;
+    // Skip private (`_layout`) and hidden/dotfile (`.foo`, macOS AppleDouble
+    // `._foo`) segments — they are never routes. Without the dotfile guard a
+    // "._index.tsx" sidecar (from a macOS-made tarball) becomes a route and
+    // breaks the build when esbuild tries to compile its binary contents.
+    if (segments.some((s) => s.startsWith("_") || s.startsWith("."))) continue;
 
     const params: string[] = [];
     let kind: Route["kind"] = "static";
