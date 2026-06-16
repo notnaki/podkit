@@ -617,11 +617,14 @@ function Api() {
 
       <h3>Gateway</h3>
       <p>
-        A separate proxy on port 8090 serves app traffic. Production is reachable
-        at <code>/_p/&lt;slug&gt;/…</code> and previews at{" "}
-        <code>/_p/&lt;slug&gt;--&lt;branch&gt;/…</code>; custom domains route by{" "}
-        <code>Host</code> header. The path prefix is stripped before the request
-        reaches your app. Unrouted hosts return <code>502 E_NO_ROUTE</code>;
+        A separate proxy on port 8090 serves app traffic. Every project is
+        reachable at <code>&lt;slug&gt;.&lt;apps-domain&gt;</code> (served at the
+        root) and previews at{" "}
+        <code>&lt;slug&gt;--&lt;branch&gt;.&lt;apps-domain&gt;</code>, where the apps
+        domain is <code>PODKIT_APPS_DOMAIN</code> (defaults to <code>localhost</code>,
+        so <code>&lt;slug&gt;.localhost</code> resolves in dev). The path form{" "}
+        <code>/_p/&lt;slug&gt;/…</code> also works, and custom domains route by{" "}
+        <code>Host</code> header. Unrouted hosts return <code>502 E_NO_ROUTE</code>;
         upstream failures return <code>502 E_UPSTREAM</code> (the real error is
         logged server-side, never leaked).
       </p>
@@ -714,6 +717,7 @@ function Config() {
           <tr><td className="mono">PODKIT_AUTH_FILE</td><td className="mono">~/.podkit/auth.json</td><td>Where login credentials are stored.</td></tr>
           <tr><td className="mono">PODKIT_AUTH_SECRET</td><td className="mono">podkit-dev-secret</td><td>HMAC secret for local <code>podkit auth</code> (required in production).</td></tr>
           <tr><td className="mono">PODKIT_APP_PORT</td><td className="mono">3000</td><td>Default container port for <code>cloud deploy</code>/<code>preview</code>.</td></tr>
+          <tr><td className="mono">PODKIT_APPS_DOMAIN</td><td className="mono">localhost</td><td>Wildcard domain for clean per-project URLs (<code>&lt;slug&gt;.&lt;domain&gt;</code>); point at a wildcard-DNS domain in prod.</td></tr>
         </tbody>
       </table>
 

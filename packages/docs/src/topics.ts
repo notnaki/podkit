@@ -178,10 +178,11 @@ podkit cloud preview myapp staging           # deploy cwd against the 'staging' 
 podkit cloud preview list myapp
 \`\`\`
 
-Production serves at \`/_p/<slug>/\`; a preview gets its own route key of the form
-\`<slug>--<branch>\` and is tracked separately, so a preview never owns the
-production route and tearing one down never disturbs production. Preview deploys
-automatically receive the branch's connection string as \`DATABASE_URL\`.`,
+Production serves at \`<slug>.<apps-domain>\` (also \`/_p/<slug>/\`); a preview gets
+its own URL \`<slug>--<branch>.<apps-domain>\` and is tracked separately, so a
+preview never owns the production route and tearing one down never disturbs
+production. Preview deploys automatically receive the branch's connection string
+as \`DATABASE_URL\`.`,
   },
   env: {
     topic: "env",
