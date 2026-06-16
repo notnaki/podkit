@@ -48,7 +48,7 @@ export function Project({ slug }: { slug: string }) {
         ) : detail.error ? (
           <div className="state"><strong>{detail.error.code}</strong><span>{detail.error.message}</span></div>
         ) : tab === "Overview" ? (
-          <div className="grid-2" style={{ gridTemplateColumns: "1.6fr 1fr", alignItems: "start" }}>
+          <div className="grid-2" style={{ alignItems: "start" }}>
             <section className="panel">
               <div className="panel-head">
                 <h3>Production deployment</h3>
