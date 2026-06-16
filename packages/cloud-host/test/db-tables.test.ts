@@ -36,7 +36,7 @@ beforeAll(async () => {
   client = new Client({ connectionString });
   await client.connect();
   await client.query(
-    `CREATE TABLE widgets (id serial PRIMARY KEY, name text NOT NULL, qty int)`,
+    `CREATE TABLE widgets (id serial PRIMARY KEY, name text NOT NULL, qty int, secret_token text)`,
   );
   // An internal-convention table that the editor should hide.
   await client.query(`CREATE TABLE _internal (id int)`);
@@ -58,17 +58,18 @@ describe("db-tables", () => {
     const id = widgets.columns.find((c) => c.name === "id")!;
     expect(id.isPk).toBe(true);
     expect(widgets.columns.find((c) => c.name === "name")!.nullable).toBe(false);
-    expect(widgets.columns.map((c) => c.name)).toEqual(["id", "name", "qty"]);
+    expect(widgets.columns.map((c) => c.name)).toEqual(["id", "name", "qty", "secret_token"]);
   });
 
-  it("inserts, reads, updates and deletes rows", async () => {
-    const inserted = await insertRow(client, "widgets", { name: "alpha", qty: 1 });
+  it("inserts, reads, updates and deletes rows; redacts secret columns on read", async () => {
+    const inserted = await insertRow(client, "widgets", { name: "alpha", qty: 1, secret_token: "hunter2" });
     expect(inserted.name).toBe("alpha");
     const id = inserted.id;
 
     const page = await getRows(client, "widgets", { limit: 50, offset: 0 });
     expect(page.total).toBe(1);
     expect(page.rows[0].name).toBe("alpha");
+    expect(page.rows[0].secret_token).toBe("••••••"); // redacted, not "hunter2"
 
     const updated = await updateRow(client, "widgets", { id }, { qty: 99 });
     expect(updated.qty).toBe(99);
