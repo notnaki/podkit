@@ -102,6 +102,9 @@ export interface Metrics {
   lastSeen: number | null;
 }
 export interface QueryResult { rows: Record<string, unknown>[]; rowCount: number }
+export interface TableColumn { name: string; dataType: string; nullable: boolean; isPk: boolean }
+export interface TableInfo { name: string; columns: TableColumn[] }
+export interface TableRows { rows: Record<string, unknown>[]; total: number }
 export interface Branch { id: string; name: string; database: string; createdAt: string }
 export interface CreatedBranch {
   branch: { id: string; name: string; database: string };
@@ -155,6 +158,37 @@ export const api = {
       "POST",
       `/v1/projects/${encodeURIComponent(slug)}/db/query`,
       params !== undefined ? { sql, params } : { sql },
+    ),
+  // Table editor: browse + CRUD over the project's managed Postgres.
+  getTables: (slug: string) =>
+    call<{ tables: TableInfo[] }>("GET", `/v1/projects/${encodeURIComponent(slug)}/db/tables`),
+  getTableRows: (slug: string, table: string, opts?: { limit?: number; offset?: number }) => {
+    const qs: string[] = [];
+    if (opts?.limit !== undefined) qs.push(`limit=${opts.limit}`);
+    if (opts?.offset !== undefined) qs.push(`offset=${opts.offset}`);
+    const suffix = qs.length ? `?${qs.join("&")}` : "";
+    return call<TableRows>(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/db/tables/${encodeURIComponent(table)}${suffix}`,
+    );
+  },
+  insertRow: (slug: string, table: string, values: Record<string, unknown>) =>
+    call<{ row: Record<string, unknown> }>(
+      "POST",
+      `/v1/projects/${encodeURIComponent(slug)}/db/tables/${encodeURIComponent(table)}`,
+      { values },
+    ),
+  updateRow: (slug: string, table: string, pk: Record<string, unknown>, values: Record<string, unknown>) =>
+    call<{ row: Record<string, unknown> }>(
+      "PATCH",
+      `/v1/projects/${encodeURIComponent(slug)}/db/tables/${encodeURIComponent(table)}`,
+      { pk, values },
+    ),
+  deleteRow: (slug: string, table: string, pk: Record<string, unknown>) =>
+    call<{ deleted: boolean }>(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}/db/tables/${encodeURIComponent(table)}`,
+      { pk },
     ),
   deployProject: (slug: string, contextDir: string, containerPort: number) =>
     call<{ version: string; hostPort: number; url: string }>(

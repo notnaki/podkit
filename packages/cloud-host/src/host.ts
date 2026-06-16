@@ -35,6 +35,13 @@ import {
 import { createGateway } from "@podkit/gateway";
 import { createMetricsRegistry } from "@podkit/telemetry";
 import {
+  listTables,
+  getRows,
+  insertRow,
+  updateRow,
+  deleteRow,
+} from "./db-tables.ts";
+import {
   provisionDatabase,
   dropDatabase,
   createBranchDatabase,
@@ -2339,6 +2346,161 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
+  // ---------------- Table editor: browse + CRUD over the scoped DB ----------------
+  //
+  // Backs the console's data editor. Every endpoint runs the same guard ladder as
+  // db/query (guardMutation -> 404 -> ownership) and connects as the project's
+  // SCOPED non-superuser role (or a branch's), never admin — so it can only ever
+  // touch this one tenant's database. Identifier safety lives in db-tables.ts.
+
+  type LoadedProject = NonNullable<Awaited<ReturnType<typeof store.getProjectBySlug>>>;
+
+  async function guardProject(
+    headers: Record<string, string | string[] | undefined>,
+    slug: string,
+  ): Promise<{ project: LoadedProject } | { resp: { status: number; body: unknown } }> {
+    if (!(await guardMutation(headers))) return { resp: unauthorized() };
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return { resp: { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) } };
+    }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return { resp: unauthorized() };
+    if (access === "forbidden") return { resp: forbidden() };
+    return { project };
+  }
+
+  function branchParam(
+    query: URLSearchParams,
+  ): { branchName: string | null } | { resp: { status: number; body: unknown } } {
+    const b = query.get("branchName");
+    if (b !== null && !isValidBranchName(b)) {
+      return {
+        resp: {
+          status: 400,
+          body: fail("E_BAD_ARGS", "invalid branch name", "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$"),
+        },
+      };
+    }
+    return { branchName: b };
+  }
+
+  // Resolve the SCOPED conn string for a project or one of its branches (never admin).
+  async function resolveScopedConn(
+    project: LoadedProject,
+    branchName: string | null,
+  ): Promise<{ conn: string } | { resp: { status: number; body: unknown } }> {
+    try {
+      if (branchName !== null) {
+        const branch = await store.getBranchByName(project.id, branchName);
+        if (!branch) {
+          return { resp: { status: 404, body: fail("E_NOT_FOUND", "unknown branch: " + branchName) } };
+        }
+        const conn = await store.getBranchConnectionString(branch.id);
+        if (!conn) {
+          return { resp: { status: 400, body: fail("E_QUERY_FAILED", "could not resolve the branch database") } };
+        }
+        return { conn };
+      }
+      let conn = await store.getProjectDbUrl(project.id);
+      if (!conn) {
+        const provisioned = await provisionDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          slug: project.slug,
+        });
+        conn = provisioned.connectionString;
+        await store.setProjectDbUrl(project.id, conn);
+      }
+      return { conn };
+    } catch {
+      return { resp: { status: 400, body: fail("E_QUERY_FAILED", "could not resolve the database") } };
+    }
+  }
+
+  // Connect as the scoped role, bound the statement timeout, run fn, always close.
+  // db-tables throws Errors with safe, owner-facing messages (unknown table/column,
+  // or a constraint violation on the owner's OWN database); surface them so the
+  // editor is usable — this is the project owner acting on their own data.
+  async function withScopedClient(
+    project: LoadedProject,
+    branchName: string | null,
+    fn: (client: Client) => Promise<unknown>,
+  ): Promise<{ status: number; body: unknown }> {
+    const resolved = await resolveScopedConn(project, branchName);
+    if ("resp" in resolved) return resolved.resp;
+    const client = new Client({ connectionString: resolved.conn });
+    try {
+      await client.connect();
+      await client.query("SET statement_timeout = 5000");
+      const data = await fn(client);
+      return { status: 200, body: ok(data) };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "operation failed";
+      return { status: 400, body: fail("E_DB_ERROR", message.slice(0, 300)) };
+    } finally {
+      try {
+        await client.end();
+      } catch {
+        // connection may have failed to open
+      }
+    }
+  }
+
+  router.register("GET", "/v1/projects/:slug/db/tables", async ({ headers, params, query }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({ tables: await listTables(c) }));
+  });
+
+  router.register("GET", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const limit = Number(query.get("limit") ?? "50");
+    const offset = Number(query.get("offset") ?? "0");
+    return withScopedClient(guard.project, bp.branchName, (c) =>
+      getRows(c, params.table!, {
+        limit: Number.isFinite(limit) ? limit : 50,
+        offset: Number.isFinite(offset) ? offset : 0,
+      }),
+    );
+  });
+
+  router.register("POST", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const values = ((body ?? {}) as { values?: Record<string, unknown> }).values ?? {};
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({ row: await insertRow(c, params.table!, values) }));
+  });
+
+  router.register("PATCH", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const b = (body ?? {}) as { pk?: Record<string, unknown>; values?: Record<string, unknown> };
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({
+      row: await updateRow(c, params.table!, b.pk ?? {}, b.values ?? {}),
+    }));
+  });
+
+  router.register("DELETE", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const b = (body ?? {}) as { pk?: Record<string, unknown> };
+    return withScopedClient(guard.project, bp.branchName, async (c) => {
+      await deleteRow(c, params.table!, b.pk ?? {});
+      return { deleted: true };
+    });
+  });
+
   router.register(
     "POST",
     "/v1/projects/:slug/domains",
@@ -2962,7 +3124,11 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           return;
         }
 
-        const body = method === "POST" ? await readJson(req) : undefined;
+        // Read a JSON body for any method that carries one (POST/PUT/PATCH/DELETE);
+        // GET/HEAD never do. readJson resolves {} for an empty body, so bodyless
+        // DELETEs are unaffected. (deploy-upload is handled above and never reaches here.)
+        const body =
+          method === "GET" || method === "HEAD" ? undefined : await readJson(req);
         const m = router.match(method, url.pathname);
         if (!m) {
           sendJson(res, 404, fail("E_NOT_FOUND", "not found: " + url.pathname));

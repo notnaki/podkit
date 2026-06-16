@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, getToken, type Branch } from "../api/client.ts";
 import { useApi, relativeTime } from "../lib/useApi.ts";
+import { DataEditor } from "./DataEditor.tsx";
 
 const TABS = ["Overview", "Deployments", "Logs", "Metrics", "Database", "Domains", "Environment", "Settings"] as const;
 type Tab = (typeof TABS)[number];
@@ -840,11 +841,13 @@ function Database({ slug }: { slug: string }) {
         <div className="panel-foot">Re-issuing connection strings &amp; scoped roles are on the roadmap.</div>
       </section>
 
+      <DataEditor slug={slug} />
+
       <Branches slug={slug} />
 
       <section className="panel">
         <div className="panel-head">
-          <h3>Query</h3>
+          <h3>Query <span className="faint" style={{ fontWeight: 400, fontSize: "var(--t-sm)" }}>— advanced (read-only SQL)</span></h3>
           {result && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{result.rowCount} row{result.rowCount === 1 ? "" : "s"}</span>}
         </div>
         <div className="panel-body stack">
