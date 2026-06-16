@@ -96,7 +96,13 @@ async function deployUpload(
     "-",
     "--exclude=node_modules",
     "--exclude=.git",
-    "--exclude=.podkit/dist",
+    // Exclude the whole .podkit dir: it holds locally-generated artifacts only —
+    // the prod build output, the pglite dev database (.podkit/appdata, a full
+    // Postgres data dir with a pid file and tablespace symlinks), and telemetry.
+    // Running `podkit dev` before deploying creates these; uploading them bloats
+    // the tar and trips the control-plane's symlink/traversal audit. The cloud
+    // rebuilds .podkit/build itself, so none of it is needed.
+    "--exclude=.podkit",
     "-C",
     contextDir,
     ".",
@@ -122,6 +128,13 @@ async function deployUpload(
 
     const tar = spawnImpl("tar", tarArgs, {
       stdio: ["ignore", "pipe", "pipe"],
+      // COPYFILE_DISABLE stops macOS bsdtar from emitting AppleDouble "._*"
+      // sidecar files for entries that carry extended attributes (e.g.
+      // com.apple.provenance). Those vanish on a macOS extract but GNU tar in
+      // the Linux build container extracts them as real files — so a "._index.tsx"
+      // lands in app/routes and the build chokes trying to compile binary xattr
+      // data. Without this, every deploy from a Mac fails.
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
     });
 
     let tarStderr = "";
@@ -165,7 +178,7 @@ async function deployUpload(
                 new PodkitError(
                   "E_BAD_STATE",
                   "upload too large (server returned 413)",
-                  "exclude node_modules/.git/.podkit/dist (already excluded) or remove large files",
+                  "exclude node_modules/.git/.podkit (already excluded) or remove large files",
                 ),
               ),
             );
@@ -314,7 +327,7 @@ const AVAILABLE =
 
 // `deploy` is one-click: from your app directory, run `podkit cloud deploy <slug>`
 // with NO other flags. The CLI tars the current directory (excluding
-// node_modules/.git/.podkit/dist), streams it to the control-plane, and the
+// node_modules/.git/.podkit), streams it to the control-plane, and the
 // control-plane builds a standalone podkit app (no Dockerfile needed) on the
 // vendored base image. All flags are OPTIONAL:
 //   --contextDir   directory to deploy (default: current directory)

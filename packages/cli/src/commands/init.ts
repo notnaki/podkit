@@ -41,10 +41,16 @@ function tpl(name: string): Record<string, string> {
       ) + "\n",
 
     "app/entry-client.tsx":
-      `import { hydrateRoot } from "react-dom/client";\n` +
-      `declare global { interface Window { __PODKIT_DATA__: unknown } }\n` +
-      `const root = document.getElementById("root")!;\n` +
-      `hydrateRoot(root, root.firstElementChild as never);\n`,
+      `// podkit apps are server-rendered. The default app is driven by plain form\n` +
+      `// POSTs that a route's action() handles and answers with a redirect, so the\n` +
+      `// browser just loads the next server-rendered page — there is no client state\n` +
+      `// to hydrate. This entry is intentionally a no-op.\n` +
+      `//\n` +
+      `// (Do NOT call hydrateRoot(root, root.firstElementChild): React expects a\n` +
+      `// React element, not a DOM node, so that throws during hydration and blanks\n` +
+      `// the page in a real browser. Add real client hydration here only once a\n` +
+      `// route needs client-side interactivity.)\n` +
+      `export {};\n`,
 
     "app/routes/index.tsx":
       `// A route module: optional loader(ctx) runs on the server, and its return\n` +
