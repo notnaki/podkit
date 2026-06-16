@@ -33,6 +33,11 @@ describe("buildpack generator", () => {
     );
   });
 
+  it("sets NODE_ENV=production for the runtime", () => {
+    const dockerfile = generatePodkitDockerfile({ appSubpath: "examples/hello", port: 3000 });
+    expect(dockerfile).toContain("ENV NODE_ENV=production");
+  });
+
   it("generates a Dockerfile that drops to the non-root node user", () => {
     const dockerfile = generatePodkitDockerfile({ appSubpath: "examples/hello", port: 3000 });
     expect(dockerfile).toContain("RUN chown -R node:node /app");
@@ -96,5 +101,12 @@ describe("standalone buildpack generator", () => {
     const dockerfile = generateStandalonePodkitDockerfile({ appSubpath: ".", port: 8080 });
     expect(dockerfile).toContain("EXPOSE 8080");
     expect(dockerfile).toContain('"--port","8080"');
+  });
+
+  it("sets NODE_ENV=production in the runtime stage", () => {
+    const dockerfile = generateStandalonePodkitDockerfile({ appSubpath: ".", port: 3000 });
+    expect(dockerfile).toContain("ENV NODE_ENV=production");
+    // It belongs to the runtime stage, after the builder finishes.
+    expect(dockerfile.indexOf("AS runtime")).toBeLessThan(dockerfile.indexOf("ENV NODE_ENV=production"));
   });
 });
