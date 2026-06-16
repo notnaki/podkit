@@ -74,6 +74,12 @@ export type CreateCloudOptions = {
   // Vendored base image standalone app builds build FROM. Defaults to
   // PODKIT_BASE_IMAGE env, then the runtime's DEFAULT_BASE_IMAGE.
   baseImage?: string;
+  // Apps domain for clean per-project URLs: a project is served at the root of
+  // `<slug>.<appsDomain>` (and a preview at `<slug>--<branch>.<appsDomain>`),
+  // with no manual domain step. Defaults to PODKIT_APPS_DOMAIN env, then
+  // "localhost" (browsers resolve *.localhost to 127.0.0.1, so it works in dev).
+  // In production, point this at a domain with wildcard DNS (e.g. apps.podkit.dev).
+  appsDomain?: string;
   // Abuse caps (default from env, else permissive). maxProjectsPerAccount 0 =
   // unlimited; rateLimitPerMin <=0 disables API rate limiting.
   maxProjectsPerAccount?: number;
@@ -116,9 +122,37 @@ function mimeForExt(ext: string): string {
 }
 
 // Parse the project slug out of a public gateway path like `/_p/<slug>/...`.
-function slugFromPath(path: string): string | null {
+export function slugFromPath(path: string): string | null {
   const match = /^\/_p\/([^/?#]+)/.exec(path);
   return match ? match[1]! : null;
+}
+
+// Resolve the routeMap key for an incoming gateway request, in precedence order:
+//   1. path-based `/_p/<key>` (the always-available fallback URL)
+//   2. an exact custom-domain match (domainMap: domain -> slug)
+//   3. the wildcard apps subdomain `<key>.<appsDomain>` — every project gets a
+//      clean root URL with no manual setup (the Vercel model). `<key>` is the
+//      prod slug, or `<slug>--<branch>` for a preview; both are valid host labels.
+// Returns the key to look up in routeMap (prod slug or `slug--branch`), or null.
+export function resolveRouteKey(
+  host: string,
+  path: string,
+  domainMap: Map<string, string>,
+  appsDomain: string,
+): string | null {
+  const fromPath = slugFromPath(path);
+  if (fromPath) return fromPath;
+
+  const hostname = host.replace(/:\d+$/, "").toLowerCase();
+  const fromDomain = domainMap.get(hostname);
+  if (fromDomain) return fromDomain;
+
+  if (appsDomain && hostname.endsWith("." + appsDomain.toLowerCase())) {
+    const label = hostname.slice(0, hostname.length - (appsDomain.length + 1));
+    // Single subdomain level only — a label with a dot isn't one of our route keys.
+    if (label && !label.includes(".")) return label;
+  }
+  return null;
 }
 
 // The "active" production deployment is the most recent deploy/rollback — NOT
@@ -622,6 +656,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   const baseImage =
     opts.baseImage || process.env.PODKIT_BASE_IMAGE || DEFAULT_BASE_IMAGE;
 
+  // Apps domain for clean per-project URLs (see CreateCloudOptions.appsDomain).
+  const appsDomain =
+    (opts.appsDomain || process.env.PODKIT_APPS_DOMAIN || "localhost").toLowerCase();
+
   // Build the vendored base image (the full monorepo with @podkit/* + node_modules
   // preinstalled) once, if it isn't already present locally. Idempotent: a
   // `docker image inspect` hit short-circuits, so repeated control-plane restarts
@@ -1030,24 +1068,32 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // Resolved once listen() binds the gateway, used to build public URLs.
   let gatewayUrl = "";
 
+  // The clean public URL for a route key (prod slug or `slug--branch`): the app
+  // is served at the root of `<key>.<appsDomain>`. Falls back to the path form
+  // (`/_p/<key>/`) only if gatewayUrl can't be parsed. The `/_p/<key>/` route
+  // stays valid regardless, so existing links never break.
+  function publicUrl(routeKey: string): string {
+    try {
+      const u = new URL(gatewayUrl);
+      const portPart = u.port ? ":" + u.port : "";
+      return `${u.protocol}//${routeKey}.${appsDomain}${portPart}/`;
+    } catch {
+      return gatewayUrl + "/_p/" + routeKey + "/";
+    }
+  }
+
   // Sealed in-process registry of per-project request metrics (counts, status
   // classes, latency only). Never persisted; resets on restart.
   const metrics = createMetricsRegistry();
 
   const gateway = createGateway({
     resolve: ({ host, path }) => {
-      // Path-based routing (/_p/<slug>) wins; otherwise fall back to the
-      // Host header for custom-domain routing.
-      let slug = slugFromPath(path);
-      if (!slug) {
-        // Strip any :port from the Host header before lookup.
-        const hostname = host.replace(/:\d+$/, "");
-        slug = domainMap.get(hostname) ?? null;
-      }
-      if (!slug) return null;
-      const target = routeMap.get(slug);
-      // Thread the resolved slug out so onRequest can attribute the request.
-      return target ? { host: target.host, hostPort: target.port, slug } : null;
+      // /_p/<key> path -> custom domain -> wildcard <key>.<appsDomain>.
+      const key = resolveRouteKey(host, path, domainMap, appsDomain);
+      if (!key) return null;
+      const target = routeMap.get(key);
+      // Thread the resolved key out so onRequest can attribute the request.
+      return target ? { host: target.host, hostPort: target.port, slug: key } : null;
     },
     onRequest: (m) => {
       // Only record for requests that resolved to a known project slug.
@@ -1096,7 +1142,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           version: latest ? latest.version : null,
           status: latest ? latest.status : null,
           lastDeployedAt: latest ? (latest.createdAt ?? null) : null,
-          url: latest ? gatewayUrl + "/_p/" + p.slug + "/" : null,
+          url: latest ? publicUrl(p.slug) : null,
         };
       }),
     );
@@ -1243,7 +1289,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: ok({
           version: result.version,
           hostPort: result.hostPort,
-          url: gatewayUrl + "/_p/" + slug + "/",
+          url: publicUrl(slug),
         }),
       };
     },
@@ -1388,7 +1434,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           version: result.version,
           hostPort: result.hostPort,
           branchName,
-          url: gatewayUrl + "/_p/" + routeKey + "/",
+          url: publicUrl(routeKey),
         }),
       };
     },
@@ -1686,7 +1732,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       body: ok({
         project,
         latest,
-        url: latest ? gatewayUrl + "/_p/" + slug + "/" : null,
+        url: latest ? publicUrl(slug) : null,
       }),
     };
   });
@@ -2090,7 +2136,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: ok({
           version: target.version,
           hostPort: started.hostPort,
-          url: gatewayUrl + "/_p/" + slug + "/",
+          url: publicUrl(slug),
           rolledBackTo: b.deploymentId,
         }),
       };
@@ -2994,7 +3040,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         version: result.version,
         hostPort: result.hostPort,
         branchName: previewBranchName,
-        url: gatewayUrl + "/_p/" + routeKey + "/",
+        url: publicUrl(routeKey),
       }),
     );
   }

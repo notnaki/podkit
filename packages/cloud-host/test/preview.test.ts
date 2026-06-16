@@ -382,9 +382,8 @@ describe("cloud-host branch preview deploy (real Docker + Postgres)", () => {
       const previewBody = await previewRes.json();
       expect(previewBody.ok).toBe(true);
       expect(previewBody.data.branchName).toBe("staging");
-      expect(previewBody.data.url).toBe(
-        gatewayUrl + "/_p/" + slug + "--staging/",
-      );
+      // Clean wildcard subdomain URL at the root (preview key = <slug>--<branch>).
+      expect(previewBody.data.url).toContain(slug + "--staging.localhost");
       const portB = previewBody.data.hostPort as number;
       expect(portB).not.toBe(portA);
       // The response must NEVER leak the injected branch connection string.

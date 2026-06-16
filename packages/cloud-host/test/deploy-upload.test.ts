@@ -402,7 +402,7 @@ describe("upload-based deploy (real Docker + Postgres)", () => {
       expect(res.status).toBe(200);
       expect(res.body.ok).toBe(true);
       expect(res.body.data.branchName).toBe("staging");
-      expect(String(res.body.data.url)).toContain("/_p/uplprev--staging/");
+      expect(String(res.body.data.url)).toContain("uplprev--staging.localhost");
 
       // Preview serves on its own route.
       let served = "";

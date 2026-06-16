@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     consoleDir: process.env.PODKIT_CONSOLE_DIR || undefined,
     corsOrigins: process.env.PODKIT_CORS_ORIGINS || undefined,
     baseImage,
+    appsDomain: process.env.PODKIT_APPS_DOMAIN || undefined,
     maxProjectsPerAccount: process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT
       ? Number(process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT)
       : undefined,
