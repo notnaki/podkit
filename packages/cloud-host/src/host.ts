@@ -864,9 +864,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
 
-    // Inject the project's environment variables, then layer extraEnv on top.
-    const envRows = await store.listEnv(input.projectId);
+    // Build the container env. Precedence (lowest → highest):
+    //   1. the project's managed-Postgres connection string as DATABASE_URL, so
+    //      a production deploy talks to its provisioned database by default
+    //      (previews override this below with their branch-scoped URL);
+    //   2. the project's user-set environment variables (env set);
+    //   3. extraEnv (e.g. a preview's branch-scoped DATABASE_URL).
     const env: Record<string, string> = {};
+    const projectDbUrl = await store.getProjectDbUrl(input.projectId);
+    if (projectDbUrl) {
+      env.DATABASE_URL = projectDbUrl;
+    }
+    const envRows = await store.listEnv(input.projectId);
     for (const row of envRows) {
       env[row.key] = row.value;
     }
@@ -2792,9 +2801,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         branchName: previewBranchName,
         extraEnv: previewExtraEnv,
       });
-    } catch {
+    } catch (err) {
       // Defensive: extractAndBuild already cleans up, but guard against an
       // unexpected throw so we never leak the temp dir or a stack trace.
+      // Log the real error server-side (the client only gets a generic 500) so
+      // a failed deploy is diagnosable instead of silently swallowed.
+      console.error("[podkit] deploy-upload failed for " + input.slug + ":", err);
       try {
         rmSync(extractParent, { recursive: true, force: true });
       } catch {

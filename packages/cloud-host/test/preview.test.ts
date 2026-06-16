@@ -212,8 +212,10 @@ beforeAll(async () => {
       "createServer((_req, res) => {",
       '  const kind = process.env.DEPLOYMENT_KIND ?? "unset";',
       '  const dbUrl = process.env.DATABASE_URL ?? "";',
+      '  let db = "";',
+      "  try { db = new URL(dbUrl).pathname.slice(1); } catch {}",
       "  res.writeHead(200, { 'content-type': 'text/plain' });",
-      "  res.end('DEPLOYMENT_KIND=' + kind + ' DATABASE_URL_SET=' + (dbUrl ? 'yes' : 'no'));",
+      "  res.end('DEPLOYMENT_KIND=' + kind + ' DATABASE_URL_SET=' + (dbUrl ? 'yes' : 'no') + ' DB=' + db);",
       "}).listen(3000);",
       "",
     ].join("\n"),
@@ -310,8 +312,11 @@ describe("cloud-host branch preview deploy (real Docker + Postgres)", () => {
           "prod never served. last=" + prodServed.text + (await dumpAppLogs()),
         );
       }
-      // Production has the inherited env but no branch DATABASE_URL injected.
-      expect(prodServed.text).toContain("DATABASE_URL_SET=no");
+      // Production inherits the project env AND gets the project's own managed
+      // Postgres injected as DATABASE_URL (the project DB, not a branch).
+      expect(prodServed.text).toContain("DATABASE_URL_SET=yes");
+      expect(prodServed.text).toContain("DB=proj_e2e_preview");
+      expect(prodServed.text).not.toContain("staging");
 
       // (4) Create a branch (copy-on-create clone with its own scoped DB).
       const branchRes = await fetch(apiUrl + `/v1/projects/${slug}/branches`, {
@@ -385,17 +390,18 @@ describe("cloud-host branch preview deploy (real Docker + Postgres)", () => {
       // The response must NEVER leak the injected branch connection string.
       expect(JSON.stringify(previewBody)).not.toContain(branchConnString);
 
-      // Preview serves; inherits project env AND has the branch DATABASE_URL.
+      // Preview serves; inherits project env AND has the BRANCH DATABASE_URL
+      // (the branch DB, overriding the project DB that prod got).
       const previewServed = await pollGateway(
         "/_p/" + slug + "--staging/",
         (t) =>
           t.includes("DEPLOYMENT_KIND=production") &&
-          t.includes("DATABASE_URL_SET=yes"),
+          t.includes("DB=proj_e2e_preview_staging"),
       );
       if (
         !(
           previewServed.text.includes("DEPLOYMENT_KIND=production") &&
-          previewServed.text.includes("DATABASE_URL_SET=yes")
+          previewServed.text.includes("DB=proj_e2e_preview_staging")
         )
       ) {
         throw new Error(
@@ -456,7 +462,9 @@ describe("cloud-host branch preview deploy (real Docker + Postgres)", () => {
         (t) => t.includes("DEPLOYMENT_KIND=production"),
       );
       expect(prodStill.status).toBe(200);
-      expect(prodStill.text).toContain("DATABASE_URL_SET=no");
+      // Prod still has its own project DB (the preview's branch DB never leaks in).
+      expect(prodStill.text).toContain("DB=proj_e2e_preview");
+      expect(prodStill.text).not.toContain("staging");
 
       // (8) Tear down the preview -> route cleared, preview URL 502, prod live.
       const stopRes = await fetch(
