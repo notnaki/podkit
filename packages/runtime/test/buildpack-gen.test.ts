@@ -72,6 +72,21 @@ describe("standalone buildpack generator", () => {
     expect(dockerfile).not.toContain("podkit-base:latest");
   });
 
+  it("flows a digest-pinned base image into the FROM lines", () => {
+    // A reproducible, content-addressed pin (PODKIT_BASE_IMAGE=name@sha256:...).
+    const pinned =
+      "registry.example.com/podkit-base@sha256:" + "a".repeat(64);
+    const dockerfile = generateStandalonePodkitDockerfile({
+      appSubpath: ".",
+      port: 3000,
+      baseImage: pinned,
+    });
+    expect(dockerfile).toContain(`FROM ${pinned} AS builder`);
+    expect(dockerfile).toContain(`FROM ${pinned} AS runtime`);
+    // The mutable default tag must NOT appear when a digest pin is supplied.
+    expect(dockerfile).not.toContain("podkit-base:latest");
+  });
+
   it("grafts the app into the base workspace and installs from the workspace root", () => {
     const dockerfile = generateStandalonePodkitDockerfile({ appSubpath: ".", port: 3000 });
     // The app is grafted under the base's apps/* glob so workspace:* deps resolve.
