@@ -23,6 +23,9 @@ export { pullSchema, generateTsSchema } from "./pull.ts";
 
 export { enableRls, ownedBy, inOrg, isAgent, customPolicy } from "./rls/policy.ts";
 
+export { createRestHandler } from "./rest/handler.ts";
+export type { RestHandler, RestHandlerOptions } from "./rest/handler.ts";
+
 export { createRealtime, assertChannel, notifyTriggerSql } from "./realtime.ts";
 export type {
   Realtime,
