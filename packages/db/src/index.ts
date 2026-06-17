@@ -22,3 +22,11 @@ export { applyMigrations } from "./migrations/apply.ts";
 export { pullSchema, generateTsSchema } from "./pull.ts";
 
 export { enableRls, ownedBy, inOrg, isAgent, customPolicy } from "./rls/policy.ts";
+
+export { createRealtime, assertChannel, notifyTriggerSql } from "./realtime.ts";
+export type {
+  Realtime,
+  CreateRealtimeOptions,
+  NotifyHandler,
+  Unsubscribe,
+} from "./realtime.ts";
