@@ -67,6 +67,7 @@ import {
   sendEmail,
 } from "@podkit/auth";
 import { checkAccountCaps, type AccountCaps } from "./account-caps.ts";
+import { signBlob, verifyBlob } from "./blob-sign.ts";
 
 export type CreateCloudOptions = {
   controlPlaneConnectionString: string;
@@ -574,6 +575,11 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     connectionString: opts.controlPlaneConnectionString,
   });
   const apiKey = opts.apiKey;
+  // Signing secret for public blob download tokens.
+  // ponytail: falls back to apiKey or a dev placeholder; set PODKIT_BLOB_SIGN_SECRET
+  // in production to an independent, randomly-generated 256-bit value.
+  const blobSignSecret =
+    process.env.PODKIT_BLOB_SIGN_SECRET ?? opts.apiKey ?? "podkit-dev-secret";
   const consoleDir = opts.consoleDir ? resolve(opts.consoleDir) : undefined;
   // Optional CORS allowlist. Unset (null) preserves the permissive "*" default
   // so local dev and the Vite proxy keep working; when set, only listed Origins
@@ -3216,6 +3222,130 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
+  // ---- Blob / file storage -----------------------------------------------
+  // ponytail: base64-in-JSON upload; 10 MB cap on decoded bytes.
+  //           Upgrade to streaming/multipart for large files.
+
+  const BLOB_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+
+  router.register(
+    "PUT",
+    "/v1/projects/:slug/blobs/:key",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const key = params.key!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const b = (body ?? {}) as { contentType?: string; dataBase64?: string };
+      if (typeof b.contentType !== "string" || b.contentType.length === 0) {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "contentType required", "PUT /v1/projects/:slug/blobs/:key {contentType, dataBase64}"),
+        };
+      }
+      if (typeof b.dataBase64 !== "string") {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "dataBase64 required", "PUT /v1/projects/:slug/blobs/:key {contentType, dataBase64}"),
+        };
+      }
+      let data: Buffer;
+      try {
+        data = Buffer.from(b.dataBase64, "base64");
+      } catch {
+        return { status: 400, body: fail("E_BAD_ARGS", "dataBase64 is not valid base64") };
+      }
+      if (data.length > BLOB_MAX_BYTES) {
+        return {
+          status: 413,
+          body: fail("E_TOO_LARGE", "blob exceeds 10 MB limit", "ponytail: upgrade to streaming/multipart for large files"),
+        };
+      }
+      await store.putBlob({
+        projectId: project.id,
+        key,
+        contentType: b.contentType,
+        data,
+        size: data.length,
+      });
+      return { status: 200, body: ok({ key, size: data.length }) };
+    },
+  );
+
+  router.register(
+    "GET",
+    "/v1/projects/:slug/blobs",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const items = await store.listBlobs(project.id);
+      return { status: 200, body: ok({ blobs: items }) };
+    },
+  );
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/blobs/:key",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const key = params.key!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      await store.deleteBlob(project.id, key);
+      return { status: 200, body: ok({ deleted: key }) };
+    },
+  );
+
+  router.register(
+    "GET",
+    "/v1/projects/:slug/blobs/:key/url",
+    async ({ headers, params, query }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const key = params.key!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const expSecStr = query.get("expSec");
+      const expSec = expSecStr ? Number(expSecStr) : 3600;
+      if (!Number.isFinite(expSec) || expSec < 1 || expSec > 604800) {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "expSec must be 1..604800 (max 7 days)", "?expSec=3600"),
+        };
+      }
+      const expMs = Date.now() + expSec * 1000;
+      const sig = signBlob(project.id, key, expMs, blobSignSecret);
+      const url =
+        `/v1/blob/${encodeURIComponent(project.id)}/${encodeURIComponent(key)}` +
+        `?exp=${expMs}&sig=${encodeURIComponent(sig)}`;
+      return { status: 200, body: ok({ url }) };
+    },
+  );
+
   // Handle POST /v1/projects/:slug/deploy-upload. The request body is a gzipped
   // tarball of the build context streamed directly to disk (never buffered) with
   // a hard MAX_UPLOAD_BYTES guard (413 on overflow). Secure-by-default ladder,
@@ -3557,6 +3687,43 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
             );
             return;
           }
+        }
+
+        // Public blob download: GET /v1/blob/:projectId/:key?exp=<ms>&sig=<token>
+        // No auth — the signed token IS the authorization. Handled outside the JSON
+        // router because the response is raw bytes, not JSON.
+        const blobDownloadMatch =
+          method === "GET"
+            ? /^\/v1\/blob\/([^/]+)\/([^/]+)$/.exec(url.pathname)
+            : null;
+        if (blobDownloadMatch) {
+          const projectId = decodeURIComponent(blobDownloadMatch[1]!);
+          const blobKey = decodeURIComponent(blobDownloadMatch[2]!);
+          const expStr = url.searchParams.get("exp");
+          const sig = url.searchParams.get("sig");
+          if (!expStr || !sig) {
+            sendJson(res, 400, fail("E_BAD_ARGS", "exp and sig query params required"));
+            return;
+          }
+          const expMs = Number(expStr);
+          if (!Number.isFinite(expMs)) {
+            sendJson(res, 400, fail("E_BAD_ARGS", "exp must be a number"));
+            return;
+          }
+          if (!verifyBlob(projectId, blobKey, expMs, sig, blobSignSecret, Date.now())) {
+            sendJson(res, 401, fail("E_UNAUTHORIZED", "invalid or expired blob token"));
+            return;
+          }
+          const blob = await store.getBlob(projectId, blobKey);
+          if (!blob) {
+            sendJson(res, 404, fail("E_NOT_FOUND", "blob not found"));
+            return;
+          }
+          res.statusCode = 200;
+          res.setHeader("content-type", blob.contentType);
+          res.setHeader("content-length", blob.data.length);
+          res.end(blob.data);
+          return;
         }
 
         // Upload-based deploy is handled OUTSIDE the JSON router because the body
