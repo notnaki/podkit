@@ -349,6 +349,55 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
         client bundle, so it never ships to the browser.
       </p>
 
+      <h3>Adding interactivity (no <code>"use client"</code>)</h3>
+      <p>
+        podkit has <strong>no <code>"use client"</code> / <code>"use server"</code>{" "}
+        directives</strong>. The server/client split is structural — by{" "}
+        <em>which export</em> a value is, not by an annotation you sprinkle on
+        files:
+      </p>
+      <table className="table docs-table">
+        <thead>
+          <tr><th>Export</th><th>Runs where</th></tr>
+        </thead>
+        <tbody>
+          <tr><td className="mono">loader / action</td><td>Server only. Stripped from the client bundle — put DB calls, secrets, and <code>node:</code> imports here.</td></tr>
+          <tr><td className="mono">default component</td><td>Server (SSR) <em>and</em> client (hydration). Where your JSX, <code>useState</code>, effects, and event handlers live.</td></tr>
+          <tr><td className="mono">_layout default</td><td>Same as a component — server + client, wrapping the page.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        So to make something interactive you just write a normal React component
+        — no directive, no separate file. The same component renders on the
+        server and then wakes up in the browser:
+      </p>
+      <Block>{`// app/routes/counter.tsx
+import { useState } from "react";
+import { randomUUID } from "node:crypto";        // server-only
+
+// Runs on the server; stripped from the browser bundle (so node:crypto is fine).
+export function loader() {
+  return { id: randomUUID(), start: 0 };
+}
+
+// Server-rendered AND hydrated. useState + onClick work in the browser.
+export default function Counter({ data }: { data: { id: string; start: number } }) {
+  const [n, setN] = useState(data.start);
+  return (
+    <main>
+      <p>session {data.id}</p>
+      <button onClick={() => setN((c) => c + 1)}>clicked {n} times</button>
+    </main>
+  );
+}`}</Block>
+      <p>
+        <strong>The one rule:</strong> code your <em>component</em> imports is
+        bundled for the browser, so keep server-only things (DB clients, secrets,{" "}
+        <code>node:</code> built-ins) inside <code>loader</code>/<code>action</code>{" "}
+        or modules only they import — that's what gets stripped. Pass what the
+        component needs through the loader's <code>data</code>.
+      </p>
+
       <h3>Build &amp; serve</h3>
       <table className="table docs-table">
         <thead><tr><th>Command</th><th>Behavior</th></tr></thead>

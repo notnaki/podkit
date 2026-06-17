@@ -45,9 +45,19 @@ with \`_\` are never routes.
 After SSR the framework **hydrates** the page in the browser: it ships a client
 bundle (owned by the framework — apps don't write \`entry-client.tsx\`) that
 re-mounts the same route + layout components with the embedded data, so
-\`useState\`, effects, and event handlers work. Server-only route code
-(\`loader\`/\`action\` and the \`node:\`/\`@podkit/db\` imports they use) is stripped
-from that bundle, so it never reaches the browser.`,
+\`useState\`, effects, and event handlers work.
+
+There are **no \`"use client"\`/\`"use server"\` directives**. The split is
+structural — by which export a value is, not an annotation:
+- \`loader\`/\`action\` run on the server only and are stripped from the client
+  bundle (along with the \`node:\`/\`@podkit/db\` imports only they use) — put DB
+  calls, secrets, and Node built-ins here.
+- the default component (and \`_layout\` components) run on the server (SSR) and
+  the client (hydration) — write normal React there, no directive needed.
+
+The one rule: whatever your *component* imports is bundled for the browser, so
+keep server-only modules inside \`loader\`/\`action\` and pass what the component
+needs through the loader's \`data\`.`,
   },
   db: {
     topic: "db",
