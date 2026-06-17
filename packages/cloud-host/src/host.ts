@@ -64,6 +64,7 @@ import {
   verifyToken,
   resolveAuthSecret,
 } from "@podkit/auth";
+import { checkAccountCaps, type AccountCaps } from "./account-caps.ts";
 
 export type CreateCloudOptions = {
   controlPlaneConnectionString: string;
@@ -833,6 +834,52 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     opts.maxProjectsPerAccount ??
     Number(process.env.PODKIT_MAX_PROJECTS_PER_ACCOUNT ?? "0");
 
+  // Aggregate per-account resource caps, enforced at deploy time (the machine
+  // API key is exempt). All tenant containers run at the runtime default memory
+  // (512m), so per-container memory is uniform and aggregate memory == active
+  // container count * PER_CONTAINER_MEMORY_MB. 0 = unlimited for each cap.
+  const accountCaps: AccountCaps = {
+    maxMemoryMb: Number(process.env.PODKIT_MAX_MEMORY_MB_PER_ACCOUNT ?? "0"),
+    maxContainers: Number(process.env.PODKIT_MAX_CONTAINERS_PER_ACCOUNT ?? "0"),
+    // Must match runContainer's default --memory (512m). ponytail: hard-coded to
+    // the runtime default; threading the actual per-deploy memory limit through
+    // is the upgrade (also enables non-uniform container sizes).
+    perContainerMemoryMb: 512,
+  };
+
+  // Count an account's currently-active containers across ALL its projects. A
+  // deployment is "active" if it currently owns a live route: production keeps
+  // the most recent deploy/rollback (findActiveDeployment), and each preview
+  // branch keeps its most recent preview that hasn't been superseded by a
+  // kind="stopped" teardown marker. This is the figure the aggregate caps gate
+  // on. Returns a count (uniform per-container memory turns it into MB).
+  async function countActiveContainers(accountId: string): Promise<number> {
+    const all = await store.listProjects();
+    const mine = all.filter((p) => p.owner === accountId);
+    let count = 0;
+    for (const p of mine) {
+      const deps = await store.listDeployments(p.id);
+      // Production: at most one active deploy/rollback.
+      if (findActiveDeployment(deps)) count += 1;
+      // Previews: most-recent-wins per branch, dropped once a "stopped" marker
+      // for that branch appears after it. Walk newest->oldest and count each
+      // branch's first preview unless a later "stopped" already retired it.
+      const seen = new Set<string>();
+      const stopped = new Set<string>();
+      for (let i = deps.length - 1; i >= 0; i--) {
+        const d = deps[i]!;
+        const key = d.branchId ?? "";
+        if (d.kind === "stopped") {
+          stopped.add(key);
+        } else if (d.kind === "preview" && !seen.has(key)) {
+          seen.add(key);
+          if (!stopped.has(key)) count += 1;
+        }
+      }
+    }
+    return count;
+  }
+
   // Shared build+run+record+route pipeline for both production deploys and
   // branch previews. The caller is responsible for credential/ownership checks
   // and for validating/resolving contextDir BEFORE calling this. Production uses
@@ -1265,6 +1312,25 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }
       const contextDir = ctx.path;
 
+      // Aggregate per-account caps (machine API key is exempt). A production
+      // redeploy supersedes its own active container, so it does not add a net
+      // new one — only enforce when this project has no current active prod
+      // deployment (i.e. the deploy would grow the account's container count).
+      if (!requireApiKey(headers, apiKey) && project.owner) {
+        const existing = await store.listDeployments(project.id);
+        const hasActiveProd = findActiveDeployment(existing) !== undefined;
+        if (!hasActiveProd) {
+          const active = await countActiveContainers(project.owner);
+          const decision = checkAccountCaps(accountCaps, active);
+          if (!decision.ok) {
+            return {
+              status: decision.status,
+              body: fail(decision.code, decision.message, decision.hint),
+            };
+          }
+        }
+      }
+
       const result = await buildAndDeploy({
         slug,
         projectId: project.id,
@@ -1402,6 +1468,23 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
             "re-create the branch",
           ),
         };
+      }
+
+      // Aggregate per-account caps (machine API key is exempt). A redeploy of an
+      // already-live preview for THIS branch supersedes its own container, so it
+      // adds no net new one; only enforce when this branch has no active preview.
+      if (!requireApiKey(headers, apiKey) && project.owner) {
+        const liveForBranch = activePreview.get(slug)?.get(branchName);
+        if (!liveForBranch) {
+          const active = await countActiveContainers(project.owner);
+          const decision = checkAccountCaps(accountCaps, active);
+          if (!decision.ok) {
+            return {
+              status: decision.status,
+              body: fail(decision.code, decision.message, decision.hint),
+            };
+          }
+        }
       }
 
       const result = await buildAndDeploy({
