@@ -204,4 +204,23 @@ describe("runContainer resource limits (arg-level)", () => {
     expect(args).toContain("-p");
     expect(args[args.indexOf("-p") + 1]).toBe("127.0.0.1:0:8080");
   });
+
+  it("mounts a read-only root filesystem with a writable /tmp tmpfs", async () => {
+    const args = await captureRunArgs({
+      image: "podkit-rt-test:latest",
+      name: "podkit-rt-readonly",
+      containerPort: 8080,
+    });
+
+    // Immutable root filesystem.
+    expect(args).toContain("--read-only");
+
+    // A single writable tmpfs at /tmp (capped + noexec/nosuid/nodev).
+    expect(args).toContain("--tmpfs");
+    const tmpfsVal = args[args.indexOf("--tmpfs") + 1] ?? "";
+    expect(tmpfsVal.startsWith("/tmp")).toBe(true);
+    expect(tmpfsVal).toContain("noexec");
+    expect(tmpfsVal).toContain("nosuid");
+    expect(tmpfsVal).toContain("nodev");
+  });
 });

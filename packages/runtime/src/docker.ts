@@ -133,7 +133,12 @@ export async function buildImage(opts: BuildImageOptions): Promise<BuildImageRes
  * Resource limits default to memory=512m, cpus=0.5, pidsLimit=512, nofile=1024 to contain
  * fork bombs and memory exhaustion DoS from tenant containers against the host and co-tenants.
  * Hardening: ports bind to 127.0.0.1 (no external exposure), all Linux capabilities are dropped,
- * and no-new-privileges blocks setuid/setgid privilege escalation inside the container.
+ * no-new-privileges blocks setuid/setgid privilege escalation inside the container, and the root
+ * filesystem is mounted read-only (--read-only) so a compromised tenant process cannot tamper
+ * with its own image/binaries. A small writable tmpfs is mounted at /tmp for the scratch space a
+ * Node app needs at runtime (the app itself runs from its built dir under /app, which it only
+ * reads; all writes go to the tmpfs). The tmpfs is capped (size + noexec/nosuid/nodev) so it
+ * can't be abused as unbounded writable storage or to stage an executable payload.
  */
 export async function runContainer(opts: RunContainerOptions): Promise<RunContainerResult> {
   const args = [
@@ -150,6 +155,13 @@ export async function runContainer(opts: RunContainerOptions): Promise<RunContai
     "ALL",
     "--security-opt",
     "no-new-privileges",
+    "--read-only",
+    // Writable scratch for a Node app: /tmp only. Capped + noexec/nosuid/nodev so
+    // the tmpfs can't be filled unbounded or used to stage an executable payload.
+    // ponytail: /tmp covers the common case (os.tmpdir, build-free prod start);
+    // add more tmpfs mounts here only if a real app needs another writable path.
+    "--tmpfs",
+    "/tmp:rw,noexec,nosuid,nodev,size=64m",
     "--memory",
     opts.memory ?? "512m",
     "--cpus",
