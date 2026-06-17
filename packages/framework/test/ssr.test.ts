@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createElement } from "react";
+import { createElement, Suspense, use } from "react";
 import type { ServerResponse } from "node:http";
 import { renderPage, renderPageToStream } from "../src/render/ssr.ts";
 
@@ -135,6 +135,40 @@ describe("renderPageToStream", () => {
     expect(html).toContain('src="/entry.js"');
     // Order: root opens before the closing tag + script tail.
     expect(html.indexOf('<div id="root">')).toBeLessThan(html.indexOf("</div><script>"));
+  });
+
+  it("streams a <Suspense> boundary: fallback first, then resolved content, then the data tail", async () => {
+    // A component that suspends on a promise that resolves AFTER the shell flush,
+    // so React emits the fallback in the shell and streams the resolved HTML
+    // (in its hidden swap <div>) afterward.
+    let pending: Promise<string> | null = null;
+    function Async() {
+      if (!pending) pending = new Promise((r) => setTimeout(() => r("RESOLVED_CONTENT"), 30));
+      return createElement("p", null, use(pending));
+    }
+    const page = {
+      default: () =>
+        createElement(
+          "div",
+          null,
+          createElement("h1", null, "SHELL"),
+          createElement(
+            Suspense,
+            { fallback: createElement("span", null, "FALLBACK_MARKER") },
+            createElement(Async),
+          ),
+        ),
+    };
+    const html = await streamToString(page, { from: "loader" });
+    // Both the fallback (flushed in the shell) and the streamed resolved content.
+    expect(html).toContain("FALLBACK_MARKER");
+    expect(html).toContain("RESOLVED_CONTENT");
+    // The hydration data tail is still emitted, and AFTER all streamed content.
+    expect(html).toContain('window.__PODKIT_DATA__ = {"from":"loader"}');
+    expect(html.indexOf("RESOLVED_CONTENT")).toBeLessThan(
+      html.indexOf("window.__PODKIT_DATA__"),
+    );
+    expect(html.trimEnd().endsWith("</html>")).toBe(true);
   });
 
   it("passes each layout its own data when streaming", async () => {
