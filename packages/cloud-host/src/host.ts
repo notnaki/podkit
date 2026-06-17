@@ -178,6 +178,14 @@ function findActiveDeployment<T extends { kind: string }>(
   return undefined;
 }
 
+// Scale-to-zero idle decision: a route is reaped once it has been idle (no
+// request) for at least idleMs. idleMs <= 0 disables reaping entirely. Pure so
+// the policy can be unit-tested without spinning up containers.
+export function shouldReap(lastSeenMs: number, nowMs: number, idleMs: number): boolean {
+  if (idleMs <= 0) return false;
+  return nowMs - lastSeenMs >= idleMs;
+}
+
 // Reject any SQL that is not a single, read-only SELECT. This is a deliberately
 // conservative allow/deny gate layered *in front of* the per-project scoped role
 // (which is the real isolation boundary — see provisionDatabase): even a parser
@@ -785,6 +793,113 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
   }
 
+  // --- Cold start / scale-to-zero ------------------------------------------
+  // Enabled by PODKIT_IDLE_TIMEOUT_MIN > 0. When on, idle production containers
+  // are stopped (scaled to zero) and re-run on the next request, with the gateway
+  // serving a holding page during the wake. Off (default) => behavior unchanged.
+  const idleTimeoutMin = Number(process.env.PODKIT_IDLE_TIMEOUT_MIN ?? "0");
+  const idleMs =
+    Number.isFinite(idleTimeoutMin) && idleTimeoutMin > 0 ? idleTimeoutMin * 60_000 : 0;
+  const coldStartEnabled = idleMs > 0;
+  // route key -> last request time (ms). Seeded on first reaper sighting, bumped
+  // on every request; drives the idle decision.
+  const lastSeen = new Map<string, number>();
+  // prod slugs scaled to zero — the resolver reports these as "sleeping" so the
+  // gateway wakes them; cleared once a wake re-establishes the route.
+  const sleeping = new Set<string>();
+  // prod slugs with a wake in flight, so concurrent cold requests trigger one start.
+  const waking = new Set<string>();
+
+  // Re-run the active production deployment's cached, version-tagged image and
+  // route to it. Mirrors the rollback path but records NO new deployment — it just
+  // brings the existing active version back online. Deduped via `waking`; on any
+  // failure the project stays asleep and the next request retries.
+  async function wakeProject(slug: string): Promise<void> {
+    if (!coldStartEnabled) return;
+    if (routeMap.has(slug) || waking.has(slug)) return;
+    waking.add(slug);
+    try {
+      const project = await store.getProjectBySlug(slug);
+      if (!project) return;
+      const active = findActiveDeployment(await store.listDeployments(project.id));
+      if (!active || !active.containerPort) return;
+      const tag = "podkit-" + slug + ":" + active.version;
+      const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
+      const envRows = await store.listEnv(project.id);
+      const env: Record<string, string> = {};
+      for (const row of envRows) env[row.key] = row.value;
+      let started: { id: string; hostPort: number };
+      try {
+        started = await runContainer({
+          image: tag,
+          name,
+          containerPort: active.containerPort,
+          env,
+          network: appNetwork,
+        });
+      } catch {
+        return; // image may have been pruned; stay asleep, next request retries
+      }
+      runningContainers.push(name);
+      const target = routeTarget(name, active.containerPort, started.hostPort);
+      const ready = await waitForReadiness(target.host, target.port, 30000);
+      if (!ready) {
+        await stopAndForget(name);
+        return;
+      }
+      routeMap.set(slug, target);
+      lastSeen.set(slug, Date.now());
+      sleeping.delete(slug);
+      await reapSuperseded(slug, name);
+    } finally {
+      waking.delete(slug);
+    }
+  }
+
+  // Stop prod containers idle past the timeout, moving them to `sleeping` so the
+  // next request cold-starts them. Previews (keys with "--") never scale to zero.
+  // ponytail: prod-only scale-to-zero; previews stay up until teardown. Upgrade:
+  // wake previews from their branch deployment too.
+  function reapIdleContainers(): void {
+    if (!coldStartEnabled) return;
+    const now = Date.now();
+    for (const key of [...routeMap.keys()]) {
+      if (key.includes("--")) continue;
+      const seen = lastSeen.get(key);
+      if (seen === undefined) {
+        lastSeen.set(key, now); // first sighting: start its idle clock
+        continue;
+      }
+      if (!shouldReap(seen, now, idleMs)) continue;
+      const name = activeContainer.get(key);
+      routeMap.delete(key);
+      lastSeen.delete(key);
+      activeContainer.delete(key);
+      sleeping.add(key);
+      if (name) void stopAndForget(name);
+    }
+  }
+
+  let reaperTimer: ReturnType<typeof setInterval> | undefined;
+  if (coldStartEnabled) {
+    // Sweep at least once a minute (and never slower than the timeout itself).
+    reaperTimer = setInterval(reapIdleContainers, Math.min(idleMs, 60_000));
+    reaperTimer.unref?.(); // never keep the process (or tests) alive on this
+    // Mark already-deployed projects asleep so the first request wakes them —
+    // this also makes prod recover lazily after a control-plane restart.
+    void (async () => {
+      try {
+        for (const p of await store.listProjects()) {
+          if (routeMap.has(p.slug)) continue;
+          const active = findActiveDeployment(await store.listDeployments(p.id));
+          if (active && active.containerPort) sleeping.add(p.slug);
+        }
+      } catch {
+        // best-effort; reaper-driven sleeping still works without this.
+      }
+    })();
+  }
+
   // In-memory fixed-window rate limiter for CLI approval, keyed by accountId.
   // A secondary defense against userCode brute-forcing: even with high entropy,
   // we cap how fast an authenticated account can grind approval attempts.
@@ -1204,11 +1319,20 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (!key) return null;
       const target = routeMap.get(key);
       // Thread the resolved key out so onRequest can attribute the request.
-      return target ? { host: target.host, hostPort: target.port, slug: key } : null;
+      if (target) return { host: target.host, hostPort: target.port, slug: key };
+      // Known but scaled to zero: tell the gateway to cold-start + hold.
+      if (coldStartEnabled && sleeping.has(key)) return { sleeping: true, slug: key };
+      return null;
     },
     onRequest: (m) => {
       // Only record for requests that resolved to a known project slug.
-      if (m.slug) metrics.record({ slug: m.slug, statusCode: m.statusCode, latencyMs: m.latencyMs });
+      if (m.slug) {
+        metrics.record({ slug: m.slug, statusCode: m.statusCode, latencyMs: m.latencyMs });
+        if (coldStartEnabled) lastSeen.set(m.slug, Date.now());
+      }
+    },
+    onColdStart: (slug) => {
+      void wakeProject(slug);
     },
   });
 
@@ -3449,6 +3573,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
 
     async close(): Promise<void> {
+      if (reaperTimer) clearInterval(reaperTimer);
       for (const name of runningContainers) {
         try {
           await stopContainer(name);

@@ -5,10 +5,16 @@ import {
   type ServerResponse,
 } from "node:http";
 
-export type Resolver = (req: {
-  host: string;
-  path: string;
-}) => { hostPort: number; host?: string; slug?: string | null } | null;
+// A resolved route is one of:
+//  - a live upstream the gateway proxies to,
+//  - `sleeping`: the project exists but its container is scaled to zero, so the
+//    gateway wakes it (via onColdStart) and serves a holding page meanwhile,
+//  - null: no such route (502).
+export type RouteResolution =
+  | { hostPort: number; host?: string; slug?: string | null }
+  | { sleeping: true; slug: string };
+
+export type Resolver = (req: { host: string; path: string }) => RouteResolution | null;
 
 // Observability hook invoked once per request with non-sensitive metadata only:
 // the resolved project slug (or null), the response status class, and the
@@ -25,6 +31,27 @@ function fail(res: ServerResponse, status: number, code: string, message: string
   res.end(body);
 }
 
+// Cold-start holding page: the project's container is asleep and being woken.
+// 503 + Retry-After + a meta-refresh so the browser polls until it's up.
+// ponytail: meta-refresh polling (~2s), no WebSocket/SSE progress. Upgrade:
+// push readiness over SSE and swap to the app without a full reload.
+function serveHoldingPage(res: ServerResponse): void {
+  const html =
+    '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+    '<meta http-equiv="refresh" content="2"><title>Starting…</title>' +
+    "<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;" +
+    "height:100vh;margin:0;background:#0b0b0c;color:#e8e8ea}.box{text-align:center}" +
+    ".spinner{width:32px;height:32px;border:3px solid #2a2a2e;border-top-color:#8b5cf6;" +
+    "border-radius:50%;margin:0 auto 16px;animation:spin .8s linear infinite}" +
+    "@keyframes spin{to{transform:rotate(360deg)}}h1{font-size:16px;font-weight:600;margin:0}" +
+    "p{font-size:13px;color:#9a9aa2;margin:6px 0 0}</style></head><body><div class=\"box\">" +
+    '<div class="spinner"></div><h1>Starting up…</h1>' +
+    "<p>This app was asleep and is waking. The page will refresh automatically.</p>" +
+    "</div></body></html>";
+  res.writeHead(503, { "content-type": "text/html; charset=utf-8", "retry-after": "2" });
+  res.end(html);
+}
+
 // Path-based routing: `/_p/<slug>/...` extracts <slug> and strips the
 // `/_p/<slug>` prefix so the upstream sees the remaining path (default "/").
 function stripPathPrefix(path: string): string {
@@ -37,6 +64,9 @@ function stripPathPrefix(path: string): string {
 export function createGateway(opts: {
   resolve: Resolver;
   onRequest?: RequestObserver;
+  // Invoked when a request hits a scaled-to-zero project, to kick off a wake.
+  // Fire-and-forget from the gateway's view; the implementation dedupes.
+  onColdStart?: (slug: string) => void;
 }): {
   listen(port: number): Promise<{ url: string }>;
   close(): Promise<void>;
@@ -54,6 +84,18 @@ export function createGateway(opts: {
         latencyMs: Date.now() - requestStart,
       });
       fail(res, 502, "E_NO_ROUTE", "No route found");
+      return;
+    }
+    if ("sleeping" in route) {
+      // Cold start: kick off the wake and hold the browser with an auto-refresh
+      // page until the container is up and the route resolves to a live upstream.
+      opts.onColdStart?.(route.slug);
+      serveHoldingPage(res);
+      opts.onRequest?.({
+        slug: route.slug,
+        statusCode: 503,
+        latencyMs: Date.now() - requestStart,
+      });
       return;
     }
     const slug = route.slug ?? null;
