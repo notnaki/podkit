@@ -24,6 +24,7 @@ const w = window as unknown as {
   __PODKIT_DATA__?: unknown;
   __PODKIT_LAYOUT_DATA__?: unknown[];
   __podkitNavigate?: (path: string) => void;
+  __podkitPrefetch?: (path: string) => void;
 };
 
 // Build the page tree wrapped by its layouts (mirrors buildTree on the server).
@@ -48,29 +49,65 @@ if (entry && root) {
   // ponytail: full-document fallback (location.assign) on ANY fetch/lookup
   // failure — keeps correctness without re-implementing the server. Upgrade:
   // surface an in-app error boundary instead of a hard nav.
-  // ponytail: no prefetch (no eager data fetch on hover/viewport) and no scroll
-  // restoration (back/forward keeps the current scroll) — both are pure UX
-  // polish. Upgrade: prefetch on link hover + restore scroll from history state.
-  async function render(path, replace) {
+
+  // We drive scroll ourselves (save on leave, restore on back/forward), so stop
+  // the browser from also trying to.
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
+  // One-shot prefetch cache: a hover/focus on a <Link> kicks off the data fetch
+  // so the click is instant. Keyed by path; consumed (deleted) by the next nav
+  // to that path so a later visit always refetches fresh.
+  // ponytail: no TTL / size cap — entries are short-lived (hover -> click) and
+  // dropped on use. Upgrade: bound the cache + add a staleness window.
+  const prefetchCache = new Map();
+  function fetchData(path) {
+    let p = prefetchCache.get(path);
+    if (!p) {
+      p = fetch(path, { headers: { "x-podkit-data": "1" } }).then(function (res) {
+        if (!res.ok) throw new Error("data fetch " + res.status);
+        return res.json();
+      });
+      prefetchCache.set(path, p);
+    }
+    return p;
+  }
+
+  w.__podkitPrefetch = function (path) {
+    // Warm the cache; swallow failures (a real nav will retry / fall back).
+    fetchData(path).catch(function () { prefetchCache.delete(path); });
+  };
+
+  // Run fn after React has committed + painted the new tree.
+  function afterPaint(fn) {
+    requestAnimationFrame(function () { requestAnimationFrame(fn); });
+  }
+
+  async function render(path, scrollTo) {
     try {
-      const res = await fetch(path, { headers: { "x-podkit-data": "1" } });
-      if (!res.ok) throw new Error("data fetch " + res.status);
-      const payload = await res.json();
+      const payload = await fetchData(path);
+      prefetchCache.delete(path);
       const tree = buildTree(payload.route, payload.data, payload.layoutData ?? []);
       if (!tree) throw new Error("unknown route " + payload.route);
       reactRoot.render(tree);
+      afterPaint(function () { window.scrollTo(0, scrollTo || 0); });
     } catch {
+      prefetchCache.delete(path);
       window.location.assign(path);
     }
   }
 
   w.__podkitNavigate = function (path) {
+    // Stash the outgoing scroll on its history entry, then push the new one.
+    try {
+      history.replaceState(Object.assign({}, history.state, { podkitScroll: window.scrollY }), "");
+    } catch (e) {}
     history.pushState({}, "", path);
-    void render(path);
+    void render(path, 0);
   };
 
   window.addEventListener("popstate", function () {
-    void render(window.location.pathname + window.location.search + window.location.hash);
+    const y = (history.state && history.state.podkitScroll) || 0;
+    void render(window.location.pathname + window.location.search + window.location.hash, y);
   });
 }
 `;
