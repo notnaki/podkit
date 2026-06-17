@@ -15,6 +15,8 @@ export interface BuildManifestRoute {
   params: string[];
   /** SSR-compiled module file relative to serverDir (e.g. "blog/[slug]-SSR.js"). */
   serverFile: string;
+  /** SSR-compiled `_layout` modules wrapping this route, outermost first. */
+  layouts?: string[];
 }
 
 /**

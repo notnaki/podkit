@@ -29,8 +29,18 @@ the resolved \`auth\` identity or null); its return value is passed to the defau
 component as the \`data\` prop and rendered to HTML with React. Type the prop with
 \`PageProps<LoaderData<typeof loader>>\` so the component and loader can't drift.
 
-(There is no \`action\` export yet — loaders are read-side only. Handle writes
-from your own server logic or a future actions API.)`,
+A route may also export an \`action(ctx)\` for writes: it runs on non-GET
+requests (typically a form POST), receives parsed \`formData\` alongside
+\`params\`/\`url\`/\`auth\`, and returns an \`ActionResult\` — a redirect (answered
+as a 303 Post/Redirect/Get) optionally with \`cookies\` to set. Routes without an
+\`action\` return 405 for non-GET requests.
+
+**Layouts** — \`app/routes/_layout.tsx\` wraps every route; a \`<dir>/_layout.tsx\`
+wraps the routes under \`<dir>\`, nested inside the root layout. A layout is a
+presentational component that receives the page element as \`children\` (plus the
+route's loader \`data\`) — use it for shared chrome like nav and footers. Layouts
+are matched outermost-first and don't have their own loaders yet. Files beginning
+with \`_\` are never routes.`,
   },
   db: {
     topic: "db",

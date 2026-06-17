@@ -19,4 +19,34 @@ describe("renderPage", () => {
     const html = await renderPage({}, {}, "/app/entry-client.tsx");
     expect(html).toContain('<div id="root"></div>');
   });
+
+  it("wraps the page in the layout chain, outermost first", async () => {
+    const page = {
+      default: (p: { data: { name: string } }) =>
+        createElement("main", null, p.data.name),
+    };
+    const root = {
+      default: (p: { children: unknown }) =>
+        createElement("div", { "data-l": "root" }, p.children as never),
+    };
+    const inner = {
+      default: (p: { children: unknown }) =>
+        createElement("section", { "data-l": "inner" }, p.children as never),
+    };
+    const html = await renderPage(page, { name: "x" }, "/e.js", [root, inner]);
+    // root outermost, inner inside it, page innermost.
+    expect(html).toMatch(
+      /<div data-l="root"><section data-l="inner"><main>x<\/main><\/section><\/div>/,
+    );
+  });
+
+  it("passes loader data to layouts", async () => {
+    const page = { default: () => createElement("main", null, "p") };
+    const layout = {
+      default: (p: { data: { tag: string }; children: unknown }) =>
+        createElement("div", null, p.data.tag, p.children as never),
+    };
+    const html = await renderPage(page, { tag: "T" }, "/e.js", [layout]);
+    expect(html).toContain("<div>T<main>p</main></div>");
+  });
 });

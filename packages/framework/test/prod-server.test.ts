@@ -98,6 +98,23 @@ describe("prod server", () => {
     const res = await fetch(`${base}/about`, { method: "POST", redirect: "manual" });
     expect(res.status).toBe(405);
   });
+
+  it("wraps every route in the root _layout", async () => {
+    const res = await fetch(`${base}/`);
+    const body = await res.text();
+    expect(body).toContain('<div data-layout="root">');
+    expect(body).toContain("site nav");
+    expect(body).toContain("podkit home");
+  });
+
+  it("nests a route's _layout chain root → leaf", async () => {
+    const res = await fetch(`${base}/blog/hello`);
+    const body = await res.text();
+    // root layout outside the blog layout, blog layout outside the post.
+    expect(body).toMatch(
+      /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
+    );
+  });
 });
 
 describe("prod build output", () => {

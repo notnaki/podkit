@@ -36,6 +36,17 @@ describe("dev server", () => {
     const res = await fetch(`${base}/nope`);
     expect(res.status).toBe(404);
   });
+
+  it("wraps routes in the root _layout and nests deeper layouts", async () => {
+    const home = await (await fetch(`${base}/`)).text();
+    expect(home).toContain('<div data-layout="root">');
+    expect(home).toContain("site nav");
+
+    const post = await (await fetch(`${base}/blog/hello`)).text();
+    expect(post).toMatch(
+      /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
+    );
+  });
 });
 
 describe("dev server — actions", () => {

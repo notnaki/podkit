@@ -6,7 +6,7 @@ import { join, relative } from "node:path";
 import { randomBytes } from "node:crypto";
 import { verifyToken } from "@podkit/auth";
 import { createSink } from "@podkit/telemetry";
-import { buildRouteTable } from "../routing/discover.ts";
+import { buildRouteTable, findLayouts } from "../routing/discover.ts";
 import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
 import { renderPage } from "../render/ssr.ts";
@@ -33,7 +33,8 @@ export interface DevServerOptions {
 
 export async function createDevServer(opts: DevServerOptions) {
   const routesDir = join(opts.appRoot, "app", "routes");
-  const table = buildRouteTable(listFiles(routesDir).map((f) => f.split("\\").join("/")));
+  const allFiles = listFiles(routesDir).map((f) => f.split("\\").join("/"));
+  const table = buildRouteTable(allFiles);
 
   const vite: ViteDevServer = await createViteServer({
     root: opts.appRoot,
@@ -87,7 +88,12 @@ export async function createDevServer(opts: DevServerOptions) {
           return;
         }
         const data = await runLoader(mod, { params: m.params, url, auth });
-        const html = await renderPage(mod, data, clientEntry);
+        const layoutMods = (await Promise.all(
+          findLayouts(allFiles, m.route.file).map(
+            (lf) => vite.ssrLoadModule(join(routesDir, lf)) as Promise<RouteModule>,
+          ),
+        ));
+        const html = await renderPage(mod, data, clientEntry, layoutMods);
         status = 200;
         res.statusCode = 200;
         res.setHeader("content-type", "text/html");

@@ -2,7 +2,7 @@ import { build as viteBuild } from "vite";
 import react from "@vitejs/plugin-react";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
-import { buildRouteTable } from "../routing/discover.ts";
+import { buildRouteTable, findLayouts } from "../routing/discover.ts";
 import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
 
 function listFiles(dir: string, root = dir): string[] {
@@ -70,7 +70,9 @@ export async function buildApp(
   _opts: BuildAppOptions = {},
 ): Promise<BuildAppResult> {
   const routesDir = join(appRoot, "app", "routes");
-  const table = buildRouteTable(listFiles(routesDir).map((f) => f.split("\\").join("/")));
+  const allFiles = listFiles(routesDir).map((f) => f.split("\\").join("/"));
+  const table = buildRouteTable(allFiles);
+  const layoutFiles = allFiles.filter((f) => /(^|\/)_layout\.(tsx|jsx)$/.test(f));
 
   const clientOutDir = join(outDir, "client");
   const serverOutDir = join(outDir, "server");
@@ -103,6 +105,10 @@ export async function buildApp(
   const routeInputs: Record<string, string> = {};
   for (const route of table) {
     routeInputs[`routes/${ssrSlug(route.file)}-SSR`] = join(routesDir, route.file);
+  }
+  // Layouts are SSR-compiled too so the prod server can wrap pages with them.
+  for (const lf of layoutFiles) {
+    routeInputs[`routes/${ssrSlug(lf)}-SSR`] = join(routesDir, lf);
   }
 
   if (Object.keys(routeInputs).length > 0) {
@@ -153,6 +159,7 @@ export async function buildApp(
     file: route.file,
     params: route.params,
     serverFile: `routes/${ssrSlug(route.file)}-SSR.js`,
+    layouts: findLayouts(allFiles, route.file).map((lf) => `routes/${ssrSlug(lf)}-SSR.js`),
   }));
 
   const manifest: BuildManifest = {

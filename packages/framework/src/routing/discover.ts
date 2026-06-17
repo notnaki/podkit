@@ -38,3 +38,31 @@ export function buildRouteTable(files: string[]): Route[] {
   }
   return routes;
 }
+
+/**
+ * The `_layout.tsx` chain that wraps a route, outermost first.
+ *
+ * `app/routes/_layout.tsx` wraps every route; `app/routes/<dir>/_layout.tsx`
+ * wraps routes under `<dir>`. For `dash/settings/index.tsx` the chain is
+ * [`_layout.tsx`, `dash/_layout.tsx`, `dash/settings/_layout.tsx`] — whichever
+ * of those exist. Layouts are presentational: they receive `{ children, data }`
+ * (the route's loader data), not their own loader.
+ * ponytail: no per-layout loaders yet; add a layout `loader` + data merge when one needs its own server data.
+ */
+export function findLayouts(files: string[], routeFile: string): string[] {
+  const have = new Set(files);
+  const slash = routeFile.lastIndexOf("/");
+  const segs = slash < 0 ? [] : routeFile.slice(0, slash).split("/");
+  const out: string[] = [];
+  for (let i = 0; i <= segs.length; i++) {
+    const prefix = segs.slice(0, i).join("/");
+    for (const ext of ["tsx", "jsx"]) {
+      const cand = (prefix ? prefix + "/" : "") + "_layout." + ext;
+      if (have.has(cand)) {
+        out.push(cand);
+        break;
+      }
+    }
+  }
+  return out;
+}

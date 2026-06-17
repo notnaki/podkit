@@ -285,16 +285,34 @@ function Framework() {
           <tr><td className="mono">app/routes/about.tsx</td><td className="mono">/about</td><td>static</td><td>—</td></tr>
           <tr><td className="mono">app/routes/posts/[slug].tsx</td><td className="mono">/posts/:slug</td><td>dynamic</td><td className="mono">slug</td></tr>
           <tr><td className="mono">app/routes/docs/[...path].tsx</td><td className="mono">/docs/*</td><td>catch-all</td><td className="mono">path</td></tr>
+          <tr><td className="mono">app/routes/_layout.tsx</td><td className="muted">(wraps all routes)</td><td>layout</td><td>—</td></tr>
           <tr><td className="mono">app/routes/_helper.tsx</td><td className="muted">(ignored)</td><td>—</td><td>—</td></tr>
         </tbody>
       </table>
+      <p>
+        A <code>_layout.tsx</code> wraps the routes beside and below it:{" "}
+        <code>app/routes/_layout.tsx</code> wraps everything, a{" "}
+        <code>&lt;dir&gt;/_layout.tsx</code> wraps that directory's routes nested
+        inside the root layout. A layout is a presentational component that
+        receives the page as <code>children</code> (plus the route's loader{" "}
+        <code>data</code>) — use it for shared chrome like nav and footers.
+      </p>
 
       <h3>Loaders</h3>
       <p>
         Export a <code>loader</code> from a route to fetch data on the server. It
         receives a <code>LoaderContext</code> and returns any JSON-serializable
-        value, which becomes the page's <code>data</code> prop. Routes are
-        read-side only today — there is no <code>action</code> export yet.
+        value, which becomes the page's <code>data</code> prop.
+      </p>
+      <h3>Actions</h3>
+      <p>
+        Export an <code>action</code> to handle writes. It runs on non-GET
+        requests (typically a form <code>POST</code>), receives an{" "}
+        <code>ActionContext</code> with parsed <code>formData</code> alongside{" "}
+        <code>params</code>/<code>url</code>/<code>auth</code>, and returns an{" "}
+        <code>ActionResult</code> — a redirect, answered as a 303
+        Post/Redirect/Get, optionally setting <code>cookies</code>. Routes with no{" "}
+        <code>action</code> return <code>405</code> for non-GET requests.
       </p>
       <Block>{`interface LoaderContext {
   params: Record<string, string>;            // dynamic route params
@@ -314,14 +332,17 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
         valid token — always handle that case.
       </p>
 
-      <h3>SSR &amp; hydration</h3>
+      <h3>SSR</h3>
       <p>
-        On each request the matched route's default export is rendered to HTML
-        with React's <code>renderToString</code>, embedded in the document with
-        its loader data on <code>window.__PODKIT_DATA__</code>, and the shared{" "}
-        <code>app/entry-client.tsx</code> boots on the client to hydrate the
-        server-rendered markup. Data is JSON-serialized, so loader return values
-        must be JSON-safe.
+        On each request the matched route's default export — wrapped in its
+        layout chain — is rendered to HTML with React's{" "}
+        <code>renderToString</code> and the loader data is embedded on{" "}
+        <code>window.__PODKIT_DATA__</code>. Data is JSON-serialized, so loader
+        return values must be JSON-safe. The current model is prop-based SSR:
+        components receive their data as the <code>data</code> prop, and writes go
+        through <code>action</code> form posts. (Full client hydration —
+        re-mounting components for client interactivity — is on the roadmap; the
+        scaffolded <code>app/entry-client.tsx</code> is a no-op until then.)
       </p>
 
       <h3>Build &amp; serve</h3>
