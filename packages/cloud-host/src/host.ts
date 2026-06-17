@@ -2430,12 +2430,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: ok({ deploymentId: null, version: null, logs: "" }),
       };
     }
-    // The container is addressed by its id; docker logs accepts id or name.
-    // A pruned/stopped container yields an error we surface as empty logs.
+    // Address the CURRENTLY running container, not the one recorded at deploy
+    // time: cold-start wake / rollback start a fresh `--rm` container with a new
+    // id, so the recorded containerId goes stale. For the active deployment the
+    // in-memory activeContainer map holds the live name; only fall back to the
+    // recorded id (e.g. a specific historical ?deploymentId, which is gone anyway).
+    // docker logs accepts id or name; a pruned/stopped container -> empty logs.
+    const liveName = wanted ? null : activeContainer.get(slug) ?? null;
+    const ref = liveName ?? target.containerId;
     let logs = "";
-    if (target.containerId) {
+    if (ref) {
       try {
-        logs = await containerLogs(target.containerId, { tail, since });
+        logs = await containerLogs(ref, { tail, since });
       } catch {
         logs = "";
       }
@@ -4080,29 +4086,32 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           if (access === "unauth") { sendJson(res, 401, unauthorized().body); return; }
           if (access === "forbidden") { sendJson(res, 403, forbidden().body); return; }
 
-          // Resolve the active container (mirrors GET /logs).
-          const deployments = await store.listDeployments(project.id);
-          const active = findActiveDeployment(deployments);
-          if (!active || !active.containerId) {
-            // No container to stream; send an immediate done comment and close.
-            res.writeHead(200, {
-              "content-type": "text/event-stream",
-              "cache-control": "no-cache",
-              "connection": "keep-alive",
-            });
-            res.write(": connected\n\n");
-            res.end();
-            return;
-          }
-
+          // Stream the CURRENTLY running container, not the one recorded at
+          // deploy time: a cold-start wake / rollback starts a fresh `--rm`
+          // container with a new id, so the recorded containerId goes stale and
+          // `docker logs -f <stale id>` would spew "No such container" into the
+          // tail. The in-memory activeContainer map holds the live name (absent
+          // when the app is asleep or was never started).
+          const containerName = activeContainer.get(slug) ?? null;
           res.writeHead(200, {
             "content-type": "text/event-stream",
             "cache-control": "no-cache",
             "connection": "keep-alive",
           });
           res.write(": connected\n\n");
+          if (!containerName) {
+            res.write(
+              "data: " +
+                JSON.stringify({
+                  line: "(no running container — the app is asleep or has not been started; visit it or deploy to start one)",
+                }) +
+                "\n\n",
+            );
+            res.end();
+            return;
+          }
 
-          const logStream = streamContainerLogs(active.containerId, (line) => {
+          const logStream = streamContainerLogs(containerName, (line) => {
             // ponytail: one SSE event per log line; no retry field (reconnect handled client-side).
             res.write("data: " + JSON.stringify({ line }) + "\n\n");
           });
