@@ -136,10 +136,10 @@ export function DataEditor({ slug }: { slug: string }) {
             <>
               <div className="panel-body" style={{ borderTop: "1px solid var(--border)", display: "flex", gap: "8px", alignItems: "center" }}>
                 <button className="btn btn-invert" onClick={startAdd}>+ Add row</button>
-                {!canEdit && <span className="faint" style={{ fontSize: "var(--t-sm)" }}>no primary key — rows are read-only</span>}
+                {!canEdit && <span className="faint" style={{ fontSize: "var(--t-sm)" }}>no primary key, rows are read-only</span>}
                 <span style={{ flex: 1 }} />
                 <button className="btn" disabled={offset === 0} onClick={() => page(Math.max(0, offset - PAGE))}>Prev</button>
-                <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{total === 0 ? "0" : `${offset + 1}–${Math.min(offset + PAGE, total)}`} / {total}</span>
+                <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{total === 0 ? "0" : `${offset + 1}-${Math.min(offset + PAGE, total)}`} / {total}</span>
                 <button className="btn" disabled={offset + PAGE >= total} onClick={() => page(offset + PAGE)}>Next</button>
               </div>
 
@@ -206,7 +206,7 @@ export function DataEditor({ slug }: { slug: string }) {
                             <tr key={i}>
                               {cols.map((c) => {
                                 const v = r[c.name];
-                                const display = v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v);
+                                const display = v === null || v === undefined ? "-" : typeof v === "object" ? JSON.stringify(v) : String(v);
                                 return (
                                   <td
                                     key={c.name}

@@ -31,7 +31,7 @@ export function CliAuthorize() {
         <div className="panel-head"><h3>Authorize the podkit CLI</h3></div>
         <div className="panel-body stack">
           {done ? (
-            <span className="status status-ready"><span className="dot" />&#10003; Approved — return to your terminal.</span>
+            <span className="status status-ready"><span className="dot" />&#10003; Approved. Return to your terminal.</span>
           ) : (
             <>
               <p className="muted" style={{ maxWidth: "44ch" }}>

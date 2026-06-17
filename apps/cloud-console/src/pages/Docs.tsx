@@ -112,7 +112,7 @@ function GettingStarted() {
       <h1>Getting started</h1>
       <p className="docs-lede">
         podkit is an agents-first app platform: a small React SSR framework, a
-        managed Postgres per project, and one-command deploys — all driven by a
+        managed Postgres per project, and one-command deploys, all driven by a
         single CLI whose every command returns a typed JSON envelope.
       </p>
 
@@ -127,8 +127,8 @@ podkit --help`}</Block>
 
       <h3>Create an app</h3>
       <p>
-        Scaffold a new app — file-based routes, a typed server loader, and a
-        client entry — with one command, then run it locally.
+        Scaffold a new app (file-based routes, a typed server loader, and a
+        client entry) with one command, then run it locally.
       </p>
       <Block>{`podkit init my-app     # scaffold ./my-app
 cd my-app
@@ -136,7 +136,7 @@ podkit dev             # http://localhost:3000`}</Block>
       <Note>
         Until the packages are on npm, create apps inside a podkit checkout (e.g.
         under <code>examples/</code> or <code>apps/</code>) so <code>@podkit/*</code>{" "}
-        resolve as workspace packages. Deploys work either way — the cloud builds
+        resolve as workspace packages. Deploys work either way: the cloud builds
         on a base image that already includes the framework.
       </Note>
 
@@ -160,7 +160,7 @@ podkit cloud open my-app     # open the live URL`}</Block>
 function Tutorial() {
   return (
     <section id="tutorial" className="docs-section">
-      <h2>Tutorial — from zero to deployed</h2>
+      <h2>Tutorial: from zero to deployed</h2>
       <p className="docs-lede">
         A complete pass: scaffold an app, add a dynamic route with a typed
         loader, set an environment variable, and ship it.
@@ -173,7 +173,7 @@ podkit dev   # open http://localhost:3000`}</Block>
       <p>
         The scaffold gives you <code>app/routes/index.tsx</code> (with a loader)
         and <code>app/routes/about.tsx</code>. The client hydration entry is owned
-        by the framework — you don't write one.
+        by the framework, so you don't write one.
       </p>
 
       <h3>2 · Add a dynamic route with a typed loader</h3>
@@ -281,12 +281,12 @@ function Framework() {
           <tr><th>File</th><th>Matches</th><th>Kind</th><th>params</th></tr>
         </thead>
         <tbody>
-          <tr><td className="mono">app/routes/index.tsx</td><td className="mono">/</td><td>static</td><td>—</td></tr>
-          <tr><td className="mono">app/routes/about.tsx</td><td className="mono">/about</td><td>static</td><td>—</td></tr>
+          <tr><td className="mono">app/routes/index.tsx</td><td className="mono">/</td><td>static</td><td className="faint">-</td></tr>
+          <tr><td className="mono">app/routes/about.tsx</td><td className="mono">/about</td><td>static</td><td className="faint">-</td></tr>
           <tr><td className="mono">app/routes/posts/[slug].tsx</td><td className="mono">/posts/:slug</td><td>dynamic</td><td className="mono">slug</td></tr>
           <tr><td className="mono">app/routes/docs/[...path].tsx</td><td className="mono">/docs/*</td><td>catch-all</td><td className="mono">path</td></tr>
-          <tr><td className="mono">app/routes/_layout.tsx</td><td className="muted">(wraps all routes)</td><td>layout</td><td>—</td></tr>
-          <tr><td className="mono">app/routes/_helper.tsx</td><td className="muted">(ignored)</td><td>—</td><td>—</td></tr>
+          <tr><td className="mono">app/routes/_layout.tsx</td><td className="muted">(wraps all routes)</td><td>layout</td><td className="faint">-</td></tr>
+          <tr><td className="mono">app/routes/_helper.tsx</td><td className="muted">(ignored)</td><td className="faint">-</td><td className="faint">-</td></tr>
         </tbody>
       </table>
       <p>
@@ -295,7 +295,7 @@ function Framework() {
         <code>&lt;dir&gt;/_layout.tsx</code> wraps that directory's routes nested
         inside the root layout. A layout is a presentational component that
         receives the page as <code>children</code> (plus the route's loader{" "}
-        <code>data</code>) — use it for shared chrome like nav and footers.
+        <code>data</code>). Use it for shared chrome like nav and footers.
       </p>
 
       <h3>Loaders</h3>
@@ -310,7 +310,7 @@ function Framework() {
         requests (typically a form <code>POST</code>), receives an{" "}
         <code>ActionContext</code> with parsed <code>formData</code> alongside{" "}
         <code>params</code>/<code>url</code>/<code>auth</code>, and returns an{" "}
-        <code>ActionResult</code> — a redirect, answered as a 303
+        <code>ActionResult</code>: a redirect, answered as a 303
         Post/Redirect/Get, optionally setting <code>cookies</code>. Routes with no{" "}
         <code>action</code> return <code>405</code> for non-GET requests.
       </p>
@@ -329,20 +329,20 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
         <code>auth</code> is resolved from an <code>Authorization: Bearer</code>{" "}
         header or a <code>podkit_session</code> cookie, verified with{" "}
         <code>PODKIT_AUTH_SECRET</code>. It is <code>null</code> when there is no
-        valid token — always handle that case.
+        valid token, so always handle that case.
       </p>
 
       <h3>SSR &amp; hydration</h3>
       <p>
-        On each request the matched route's default export — wrapped in its
-        layout chain — is rendered to HTML with React's{" "}
+        On each request the matched route's default export, wrapped in its
+        layout chain, is rendered to HTML with React's{" "}
         <code>renderToString</code>, and the loader data plus the matched route id
         are embedded on <code>window.__PODKIT_DATA__</code> /{" "}
         <code>window.__PODKIT_ROUTE__</code>. Data is JSON-serialized, so loader
         return values must be JSON-safe. The framework-owned client entry then{" "}
         <strong>hydrates</strong> that markup: it loads the same route + layout
         components, rebuilds the tree with the embedded data, and calls{" "}
-        <code>hydrateRoot</code> — so components with <code>useState</code>,
+        <code>hydrateRoot</code>, so components with <code>useState</code>,
         effects, and event handlers become interactive in the browser. Server-only
         route code (<code>loader</code>/<code>action</code> and their{" "}
         <code>node:</code>/<code>@podkit/db</code> imports) is stripped from the
@@ -352,7 +352,7 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
       <h3>Adding interactivity (no <code>"use client"</code>)</h3>
       <p>
         podkit has <strong>no <code>"use client"</code> / <code>"use server"</code>{" "}
-        directives</strong>. The server/client split is structural — by{" "}
+        directives</strong>. The server/client split is structural, by{" "}
         <em>which export</em> a value is, not by an annotation you sprinkle on
         files:
       </p>
@@ -361,14 +361,14 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
           <tr><th>Export</th><th>Runs where</th></tr>
         </thead>
         <tbody>
-          <tr><td className="mono">loader / action</td><td>Server only. Stripped from the client bundle — put DB calls, secrets, and <code>node:</code> imports here.</td></tr>
+          <tr><td className="mono">loader / action</td><td>Server only. Stripped from the client bundle, so put DB calls, secrets, and <code>node:</code> imports here.</td></tr>
           <tr><td className="mono">default component</td><td>Server (SSR) <em>and</em> client (hydration). Where your JSX, <code>useState</code>, effects, and event handlers live.</td></tr>
-          <tr><td className="mono">_layout default</td><td>Same as a component — server + client, wrapping the page.</td></tr>
+          <tr><td className="mono">_layout default</td><td>Same as a component: server + client, wrapping the page.</td></tr>
         </tbody>
       </table>
       <p>
         So to make something interactive you just write a normal React component
-        — no directive, no separate file. The same component renders on the
+        with no directive and no separate file. The same component renders on the
         server and then wakes up in the browser:
       </p>
       <Block>{`// app/routes/counter.tsx
@@ -394,7 +394,7 @@ export default function Counter({ data }: { data: { id: string; start: number } 
         <strong>The one rule:</strong> code your <em>component</em> imports is
         bundled for the browser, so keep server-only things (DB clients, secrets,{" "}
         <code>node:</code> built-ins) inside <code>loader</code>/<code>action</code>{" "}
-        or modules only they import — that's what gets stripped. Pass what the
+        or modules only they import, since that's what gets stripped. Pass what the
         component needs through the loader's <code>data</code>.
       </p>
 
@@ -404,7 +404,7 @@ export default function Counter({ data }: { data: { id: string; start: number } 
         <tbody>
           <tr><td className="mono">podkit dev</td><td>Vite dev server with SSR and hot reload over your routes.</td></tr>
           <tr><td className="mono">podkit build</td><td>Vite client build (hashed + manifested) plus a pre-compiled SSR module per route, then a <code>build-manifest.json</code>. React stays external to the SSR bundle.</td></tr>
-          <tr><td className="mono">podkit start</td><td>Production server that dynamically imports the pre-built SSR modules — no Vite at runtime.</td></tr>
+          <tr><td className="mono">podkit start</td><td>Production server that dynamically imports the pre-built SSR modules (no Vite at runtime).</td></tr>
         </tbody>
       </table>
 
@@ -467,14 +467,14 @@ export const posts = pgTable("posts", {
         <thead><tr><th>Command</th><th>What it does</th></tr></thead>
         <tbody>
           <tr><td className="mono">podkit db migrate</td><td>Generate a migration from <code>app/db/schema.ts</code> and apply pending migrations (idempotent; tolerates "no schema changes").</td></tr>
-          <tr><td className="mono">podkit db pull</td><td>Introspect the live database and write it back to code — a SQL migration plus a regenerated drizzle <code>schema.ts</code> — for adopting an existing database.</td></tr>
+          <tr><td className="mono">podkit db pull</td><td>Introspect the live database and write it back to code (a SQL migration plus a regenerated drizzle <code>schema.ts</code>) for adopting an existing database.</td></tr>
         </tbody>
       </table>
 
       <h3>Row-level security (RLS)</h3>
       <p>
         <code>@podkit/db</code> ships helpers that emit Postgres policy SQL keyed
-        on settings podkit binds from the verified principal —{" "}
+        on settings podkit binds from the verified principal:{" "}
         <code>current_setting('podkit.user_id')</code>,{" "}
         <code>podkit.org_id</code>, and <code>podkit.is_agent</code>.
       </p>
@@ -492,7 +492,7 @@ isAgent("audit_log");               // visible only to agent tokens
         role that owns only that database. The connection string is returned once,
         at create time, and injected into your app as <code>DATABASE_URL</code> on
         deploy. <code>PUBLIC CONNECT</code> is revoked, so tenants are isolated at
-        the role level — underneath any RLS you add. Branch a database for staging
+        the role level, underneath any RLS you add. Branch a database for staging
         or previews; see <em>Concepts</em>.
       </p>
       <Note>
@@ -577,7 +577,7 @@ function CliCloud() {
         <code>podkit cloud deploy &lt;slug&gt;</code> with no other flags. The CLI
         tars the current directory (excluding <code>node_modules</code>,{" "}
         <code>.git</code>, <code>.podkit/dist</code>), streams it to the
-        control-plane, and the control-plane builds a standalone image — no
+        control-plane, and the control-plane builds a standalone image with no
         Dockerfile needed. All flags are optional:
       </p>
       <Block>{`podkit cloud deploy <slug>
@@ -711,7 +711,7 @@ function Concepts() {
         Each project gets its own database (<code>proj_&lt;slug&gt;</code>) owned
         by a dedicated <strong>non-superuser</strong> role. <code>PUBLIC CONNECT</code>{" "}
         is revoked and only that role may connect, so projects can't reach each
-        other's data. The read-only query endpoint runs as this scoped role too —
+        other's data. The read-only query endpoint runs as this scoped role too,
         never as an admin.
       </p>
 
@@ -782,7 +782,7 @@ function Config() {
         <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
         <tbody>
           <tr><td className="mono">PODKIT_API_URL</td><td className="mono">http://localhost:8080</td><td>Control-plane base URL (overridden by stored login URL / <code>--url</code>).</td></tr>
-          <tr><td className="mono">PODKIT_API_KEY</td><td className="muted">—</td><td>Machine key (<code>x-podkit-key</code>) when no login token is present.</td></tr>
+          <tr><td className="mono">PODKIT_API_KEY</td><td className="muted">-</td><td>Machine key (<code>x-podkit-key</code>) when no login token is present.</td></tr>
           <tr><td className="mono">PODKIT_AUTH_FILE</td><td className="mono">~/.podkit/auth.json</td><td>Where login credentials are stored.</td></tr>
           <tr><td className="mono">PODKIT_AUTH_SECRET</td><td className="mono">podkit-dev-secret</td><td>HMAC secret for local <code>podkit auth</code> (required in production).</td></tr>
           <tr><td className="mono">PODKIT_APP_PORT</td><td className="mono">3000</td><td>Default container port for <code>cloud deploy</code>/<code>preview</code>.</td></tr>
@@ -798,15 +798,15 @@ function Config() {
           <tr><td className="mono">PODKIT_ADMIN_DATABASE_URL</td><td className="mono">= CP url</td><td>Admin role used to provision project databases.</td></tr>
           <tr><td className="mono">PODKIT_AUTH_SECRET</td><td className="muted">required (prod)</td><td>HMAC secret for bearer tokens (64 hex chars).</td></tr>
           <tr><td className="mono">PODKIT_SECRETS_KEY</td><td className="muted">required (prod)</td><td>AES-256-GCM key for secrets at rest (64 hex chars).</td></tr>
-          <tr><td className="mono">PODKIT_API_KEY</td><td className="muted">—</td><td>Machine key for full, non-account access.</td></tr>
+          <tr><td className="mono">PODKIT_API_KEY</td><td className="muted">-</td><td>Machine key for full, non-account access.</td></tr>
           <tr><td className="mono">PODKIT_API_PORT</td><td className="mono">8080</td><td>API + console port.</td></tr>
           <tr><td className="mono">PODKIT_GATEWAY_PORT</td><td className="mono">8090</td><td>Gateway (app traffic) port.</td></tr>
-          <tr><td className="mono">PODKIT_CONSOLE_URL</td><td className="muted">—</td><td>Public console URL (used in CLI verify links).</td></tr>
-          <tr><td className="mono">PODKIT_CONSOLE_DIR</td><td className="muted">—</td><td>Directory of built console assets to serve.</td></tr>
+          <tr><td className="mono">PODKIT_CONSOLE_URL</td><td className="muted">-</td><td>Public console URL (used in CLI verify links).</td></tr>
+          <tr><td className="mono">PODKIT_CONSOLE_DIR</td><td className="muted">-</td><td>Directory of built console assets to serve.</td></tr>
           <tr><td className="mono">PODKIT_CORS_ORIGINS</td><td className="mono">* (any)</td><td>Comma-separated allowed browser origins.</td></tr>
           <tr><td className="mono">PODKIT_BASE_IMAGE</td><td className="mono">podkit-base:latest</td><td>Base image standalone builds build FROM.</td></tr>
-          <tr><td className="mono">PODKIT_APP_NETWORK</td><td className="muted">—</td><td>Docker network for app containers (container-name routing).</td></tr>
-          <tr><td className="mono">PODKIT_BUILDS_ROOT</td><td className="muted">—</td><td>Optional sandbox confining allowed build contexts.</td></tr>
+          <tr><td className="mono">PODKIT_APP_NETWORK</td><td className="muted">-</td><td>Docker network for app containers (container-name routing).</td></tr>
+          <tr><td className="mono">PODKIT_BUILDS_ROOT</td><td className="muted">-</td><td>Optional sandbox confining allowed build contexts.</td></tr>
           <tr><td className="mono">PODKIT_MAX_PROJECTS_PER_ACCOUNT</td><td className="mono">0</td><td>Per-account project quota (0 = unlimited).</td></tr>
           <tr><td className="mono">PODKIT_RATE_LIMIT_PER_MIN</td><td className="mono">600</td><td>API requests/min per credential or IP (≤0 disables).</td></tr>
         </tbody>
@@ -871,7 +871,7 @@ function Troubleshooting() {
         <tbody>
           <tr><td className="mono">E_BAD_ARGS</td><td>Invalid arguments/flags (exit 2). Check the command's flags.</td></tr>
           <tr><td className="mono">E_NO_ROUTES</td><td>No routes in <code>app/routes</code>. Create <code>app/routes/index.tsx</code> (or run <code>podkit build</code> first for <code>start</code>).</td></tr>
-          <tr><td className="mono">E_BAD_STATE</td><td>Refused due to state — e.g. <code>init</code> won't overwrite files, or an upload exceeded 500 MiB.</td></tr>
+          <tr><td className="mono">E_BAD_STATE</td><td>Refused due to state (e.g. <code>init</code> won't overwrite files, or an upload exceeded 500 MiB).</td></tr>
           <tr><td className="mono">E_UNAUTHORIZED</td><td>Token invalid/expired. Re-run <code>podkit cloud login</code>.</td></tr>
           <tr><td className="mono">E_NETWORK</td><td>Control-plane unreachable. Check <code>PODKIT_API_URL</code> / the server.</td></tr>
           <tr><td className="mono">E_QUOTA</td><td>Project limit reached (403). Delete a project or raise <code>PODKIT_MAX_PROJECTS_PER_ACCOUNT</code>.</td></tr>

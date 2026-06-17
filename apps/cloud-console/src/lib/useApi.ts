@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Envelope } from "../api/client.ts";
+import { getApiUrl, getToken } from "../api/client.ts";
 
 export interface AsyncState<T> {
   loading: boolean;
@@ -46,6 +47,138 @@ export function useApi<T>(
   }, [run, pollMs]);
 
   return { ...state, reload: () => run() };
+}
+
+// Live project status over SSE, with a graceful poll fallback.
+//
+// Subscribes to GET /v1/projects/:slug/events (an SSE stream emitting
+// {"status":"ready|sleeping|waking"}). While the stream is healthy it returns
+// the latest status and `live: true`. If EventSource errors or the connection
+// closes, it stops the stream and signals `live: false`, so the caller can fall
+// back to its existing poll. Re-subscribes when the slug changes.
+//
+// ponytail: EventSource for live status, poll as fallback. EventSource can't set
+// an Authorization header, so the token rides as a query param (the vite proxy
+// forwards /v1, and the control-plane accepts it on this read-only stream).
+export interface LiveStatus {
+  status: "ready" | "sleeping" | "waking" | null;
+  live: boolean;
+}
+
+export function useLiveStatus(slug: string | null): LiveStatus {
+  const [state, setState] = useState<LiveStatus>({ status: null, live: false });
+
+  useEffect(() => {
+    setState({ status: null, live: false });
+    if (!slug || typeof EventSource === "undefined") return;
+
+    const base = getApiUrl();
+    const token = getToken();
+    const path = `/v1/projects/${encodeURIComponent(slug)}/events`;
+    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+    const href = (base === "" ? path : base.replace(/\/$/, "") + path) + qs;
+
+    const es = new EventSource(href);
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data) as { status?: string };
+        if (data.status === "ready" || data.status === "sleeping" || data.status === "waking") {
+          setState({ status: data.status, live: true });
+        }
+      } catch {
+        // Ignore malformed frames; the poll fallback still covers correctness.
+      }
+    };
+    es.onopen = () => setState((s) => ({ ...s, live: true }));
+    es.onerror = () => {
+      // Stream failed or closed: stop it and let the caller's poll take over.
+      es.close();
+      setState({ status: null, live: false });
+    };
+
+    return () => es.close();
+  }, [slug]);
+
+  return state;
+}
+
+// Live container log tail over SSE. Subscribes to GET /v1/projects/:slug/logs/stream
+// and accumulates lines while `enabled`. Same query-param token as useLiveStatus.
+// ponytail: keeps only the last MAX_LIVE_LINES in memory; no reconnect-on-drop
+// (the caller can toggle off/on). Upgrade: backoff reconnect + a Last-Event-ID cursor.
+export interface LiveLogs {
+  text: string;
+  connected: boolean;
+}
+
+const MAX_LIVE_LINES = 2000;
+
+export function useLiveLogs(slug: string | null, enabled: boolean): LiveLogs {
+  const [state, setState] = useState<LiveLogs>({ text: "", connected: false });
+
+  useEffect(() => {
+    setState({ text: "", connected: false });
+    if (!enabled || !slug || typeof EventSource === "undefined") return;
+
+    const base = getApiUrl();
+    const token = getToken();
+    const path = `/v1/projects/${encodeURIComponent(slug)}/logs/stream`;
+    const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+    const href = (base === "" ? path : base.replace(/\/$/, "") + path) + qs;
+
+    const buf: string[] = [];
+    const es = new EventSource(href);
+    es.onopen = () => setState((s) => ({ ...s, connected: true }));
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data) as { line?: string };
+        if (typeof data.line === "string") {
+          buf.push(data.line);
+          if (buf.length > MAX_LIVE_LINES) buf.splice(0, buf.length - MAX_LIVE_LINES);
+          setState({ text: buf.join("\n"), connected: true });
+        }
+      } catch {
+        // Ignore malformed frames.
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      setState((s) => ({ ...s, connected: false }));
+    };
+
+    return () => es.close();
+  }, [slug, enabled]);
+
+  return state;
+}
+
+// Pure status resolution shared by the list cards and the project page: the live
+// SSE status wins when present; otherwise we fall back to the polled snapshot.
+// Returned `cls` is a status pill className; `label` is the human label.
+export interface ResolvedStatus {
+  cls: string;
+  label: string;
+}
+
+export function resolveStatus(
+  live: LiveStatus["status"],
+  snapshot: { status?: string | null; version?: string | null; sleeping?: boolean },
+): ResolvedStatus {
+  // Live status, when present, fully determines the pill.
+  if (live === "waking") return { cls: "status status-building", label: "Waking" };
+  if (live === "ready") return { cls: "status status-ready", label: "Ready" };
+  if (live === "sleeping") return { cls: "status status-none", label: "Sleeping" };
+
+  // Snapshot fallback: a sleeping container overrides its (immutable) deployment
+  // status, matching the runtime reality.
+  if (snapshot.sleeping) return { cls: "status status-none", label: "Sleeping" };
+  if (snapshot.status === "running") return { cls: "status status-ready", label: "Ready" };
+  if (snapshot.version) {
+    const s = snapshot.status;
+    if (s === "building") return { cls: "status status-building", label: s };
+    if (s) return { cls: "status status-error", label: s };
+  }
+  return { cls: "status status-none", label: "No deployment" };
 }
 
 export function relativeTime(ts: number, now: number): string {

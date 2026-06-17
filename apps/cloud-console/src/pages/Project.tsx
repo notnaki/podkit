@@ -1,19 +1,29 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, getToken, type Branch } from "../api/client.ts";
-import { useApi, relativeTime } from "../lib/useApi.ts";
+import { useApi, relativeTime, useLiveStatus, useLiveLogs } from "../lib/useApi.ts";
 import { DataEditor } from "./DataEditor.tsx";
 
 const TABS = ["Overview", "Deployments", "Database", "Observability", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
-  const detail = useApi(() => api.getProject(slug), [slug], 1500);
+  // Live status over SSE; fall back to a 1.5s poll only while the stream is down.
+  const live = useLiveStatus(slug);
+  const detail = useApi(() => api.getProject(slug), [slug], live.live ? undefined : 1500);
   const [tab, setTab] = useState<Tab>("Overview");
+
+  // When SSE reports a transition, pull a fresh snapshot so URL/version/deployment
+  // fields stay in sync with the new live status.
+  useEffect(() => {
+    if (live.status) detail.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.status]);
 
   const url = detail.data?.url ?? null;
   const dep = detail.data?.latest ?? null;
-  const sleeping = detail.data?.sleeping ?? false;
-  const running = dep?.status === "running" && !sleeping;
+  // Prefer the live SSE status when present; otherwise trust the polled snapshot.
+  const sleeping = live.status ? live.status !== "ready" : (detail.data?.sleeping ?? false);
+  const running = live.status ? live.status === "ready" : (dep?.status === "running" && !sleeping);
 
   return (
     <>
@@ -53,14 +63,14 @@ export function Project({ slug }: { slug: string }) {
             <section className="panel">
               <div className="panel-head">
                 <h3>Production deployment</h3>
-                <span className={running ? "status status-ready" : "status status-none"}><span className="dot" />{running ? "Ready" : sleeping ? "Sleeping" : dep ? dep.status : "None"}</span>
+                <span className={running ? "status status-ready" : live.status === "waking" ? "status status-building" : "status status-none"}><span className="dot" />{running ? "Ready" : live.status === "waking" ? "Waking" : sleeping ? "Sleeping" : dep ? dep.status : "None"}</span>
               </div>
               <div className="panel-body">
                 {dep ? (
                   <dl className="kv">
                     <dt>Version</dt><dd className="mono">{dep.version}</dd>
-                    <dt>URL</dt><dd>{url ? <a className="mono" style={{ color: "var(--link)" }} href={url} target="_blank" rel="noreferrer">{url}</a> : <span className="faint">—</span>}</dd>
-                    <dt>Port</dt><dd className="mono">{dep.hostPort ?? "—"}</dd>
+                    <dt>URL</dt><dd>{url ? <a className="mono" style={{ color: "var(--link)" }} href={url} target="_blank" rel="noreferrer">{url}</a> : <span className="faint">-</span>}</dd>
+                    <dt>Port</dt><dd className="mono">{dep.hostPort ?? "-"}</dd>
                   </dl>
                 ) : (
                   <div className="state" style={{ padding: "var(--space-xl)" }}><strong>No deployment yet</strong><span>Deploy from the CLI: <span className="mono">podkit cloud deploy {slug}</span></span></div>
@@ -73,8 +83,8 @@ export function Project({ slug }: { slug: string }) {
               <div className="panel-body">
                 <dl className="kv" style={{ gridTemplateColumns: "90px 1fr" }}>
                   <dt>Slug</dt><dd className="mono">{slug}</dd>
-                  <dt>Owner</dt><dd>{detail.data?.project.owner ?? "—"}</dd>
-                  <dt>ID</dt><dd className="mono faint" style={{ wordBreak: "break-all" }}>{detail.data?.project.id ?? "—"}</dd>
+                  <dt>Owner</dt><dd>{detail.data?.project.owner ?? "-"}</dd>
+                  <dt>ID</dt><dd className="mono faint" style={{ wordBreak: "break-all" }}>{detail.data?.project.id ?? "-"}</dd>
                 </dl>
               </div>
             </section>
@@ -141,9 +151,9 @@ function DangerZone({ slug }: { slug: string }) {
 }
 
 function fmtTime(iso: string | null): string {
-  if (!iso) return "—";
+  if (!iso) return "-";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleString(undefined, {
     month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
@@ -188,11 +198,11 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
       <section className="panel">
         <div className="panel-head"><h3>Deploy</h3></div>
         <div className="panel-body stack">
-          <p className="muted" style={{ maxWidth: "60ch", margin: 0 }}>Deploy from your project directory — no path, port, or Dockerfile to configure:</p>
+          <p className="muted" style={{ maxWidth: "60ch", margin: 0 }}>Deploy from your project directory, with no path, port, or Dockerfile to configure:</p>
           <div className="mono" style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "8px" }}>$ podkit cloud deploy {slug}</div>
           {note && <span className={note.ok ? "status status-ready" : "status status-error"}><span className="dot" />{note.text}</span>}
         </div>
-        <div className="panel-foot">Deploys are immutable; each one reroutes the URL instantly — roll back below.</div>
+        <div className="panel-foot">Deploys are immutable; each one reroutes the URL instantly. Roll back below.</div>
       </section>
       <section className="panel">
         <div className="panel-head">
@@ -219,7 +229,7 @@ function Deployments({ slug, url, reload }: { slug: string; url: string | null; 
                   <tr key={d.id}>
                     <td className="mono">{d.version}</td>
                     <td>{d.kind === "rollback" ? <span className="status status-building"><span className="dot" />rollback</span> : <span className="faint">deploy</span>}</td>
-                    <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "—")}</span></td>
+                    <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "-")}</span></td>
                     <td className="faint mono" style={{ fontSize: "var(--t-sm)" }}>{fmtTime(d.createdAt)}</td>
                     <td style={{ textAlign: "right" }}>
                       {d.active
@@ -304,7 +314,7 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
               onChange={(e) => setBranchName(e.target.value)}
               disabled={!hasKey || branches.loading}
             >
-              <option value="">{branches.loading ? "Loading branches…" : branchList.length === 0 ? "No branches — create one in Database" : "Select a branch…"}</option>
+              <option value="">{branches.loading ? "Loading branches…" : branchList.length === 0 ? "No branches (create one in Database)" : "Select a branch…"}</option>
               {branchList.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
             </select>
           </div>
@@ -340,9 +350,9 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
                       <td className="mono">
                         {bName
                           ? (pUrl ? <a style={{ color: "var(--link)" }} href={pUrl} target="_blank" rel="noreferrer">{bName} ↗</a> : bName)
-                          : <span className="faint">{d.branchId ? "unknown branch" : "—"}</span>}
+                          : <span className="faint">{d.branchId ? "unknown branch" : "-"}</span>}
                       </td>
-                      <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "—")}</span></td>
+                      <td><span className={d.status === "running" ? "status status-ready" : "status status-none"}><span className="dot" />{d.status === "running" ? "Ready" : (d.status ?? "-")}</span></td>
                       <td className="faint mono" style={{ fontSize: "var(--t-sm)" }}>{fmtTime(d.createdAt)}</td>
                       <td style={{ textAlign: "right" }}>
                         <div className="row" style={{ gap: "var(--space-sm)", justifyContent: "flex-end" }}>
@@ -388,11 +398,14 @@ function Previews({ slug, url }: { slug: string; url: string | null }) {
 function Logs({ slug }: { slug: string }) {
   const [lines, setLines] = useState("");
   const [since, setSince] = useState("");
+  const [live, setLive] = useState(false);
   // applied filters drive the request; editing the inputs doesn't refetch until Apply.
   const [applied, setApplied] = useState<{ limit?: number; since?: string }>({});
   const logs = useApi(() => api.getLogs(slug, applied), [slug, applied]);
   const data = logs.data ?? null;
-  const text = data?.logs ?? "";
+  const snapshot = data?.logs ?? "";
+  // Live tail (SSE) takes over the pane when on; the snapshot is the history view.
+  const liveLogs = useLiveLogs(slug, live);
 
   function apply() {
     const n = parseInt(lines, 10);
@@ -408,28 +421,44 @@ function Logs({ slug }: { slug: string }) {
         <h3>Runtime logs</h3>
         <div className="row" style={{ gap: "var(--space-md)", alignItems: "center" }}>
           {data?.version && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{data.version}</span>}
-          <button className="btn btn-ghost" disabled={logs.loading} onClick={() => logs.reload()}>{logs.loading ? "Refreshing…" : "Refresh"}</button>
+          <button
+            className={live ? "btn btn-invert" : "btn btn-ghost"}
+            onClick={() => setLive((v) => !v)}
+          >
+            {live ? (liveLogs.connected ? "Live ●" : "Connecting…") : "Live tail"}
+          </button>
+          <button className="btn btn-ghost" disabled={logs.loading || live} onClick={() => logs.reload()}>{logs.loading ? "Refreshing…" : "Refresh"}</button>
         </div>
       </div>
-      <div className="row" style={{ gap: "var(--space-md)", alignItems: "flex-end", padding: "var(--space-md) var(--space-lg)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+      <div className="row" style={{ gap: "var(--space-md)", alignItems: "flex-end", padding: "var(--space-md) var(--space-lg)", borderBottom: "1px solid var(--border)", flexWrap: "wrap", opacity: live ? 0.5 : 1, pointerEvents: live ? "none" : "auto" }}>
         <div className="field"><label>lines</label><input className="input mono" type="number" min={1} max={10000} placeholder="all" value={lines} onChange={(e) => setLines(e.target.value)} style={{ width: 100 }} /></div>
-        <div className="field"><label>since (e.g. 2026-06-14T12:00 or 1h)</label><input className="input mono" placeholder="—" value={since} onChange={(e) => setSince(e.target.value)} style={{ width: 220 }} /></div>
-        <button className="btn" disabled={logs.loading} onClick={apply}>Apply</button>
+        <div className="field"><label>since (e.g. 2026-06-14T12:00 or 1h)</label><input className="input mono" placeholder="-" value={since} onChange={(e) => setSince(e.target.value)} style={{ width: 220 }} /></div>
+        <button className="btn" disabled={logs.loading || live} onClick={apply}>Apply</button>
       </div>
       <div className="panel-body flush" style={{ padding: 0 }}>
-        {logs.loading ? (
+        {live ? (
+          liveLogs.text.trim() === "" ? (
+            <div className="state"><strong>{liveLogs.connected ? "Waiting for output" : "Connecting…"}</strong><span>New container output appears here as it is written.</span></div>
+          ) : (
+            <pre className="logs mono">{liveLogs.text}</pre>
+          )
+        ) : logs.loading ? (
           <div className="state">Loading…</div>
         ) : logs.error ? (
           <div className="state"><strong>{logs.error.code}</strong><span>{logs.error.message}</span></div>
         ) : !data?.deploymentId ? (
           <div className="state"><strong>No deployment yet</strong><span>Deploy this project to see its container logs.</span></div>
-        ) : text.trim() === "" ? (
+        ) : snapshot.trim() === "" ? (
           <div className="state"><strong>No log output</strong><span>The running container hasn&apos;t written anything to stdout/stderr yet.</span></div>
         ) : (
-          <pre className="logs mono">{text}</pre>
+          <pre className="logs mono">{snapshot}</pre>
         )}
       </div>
-      <div className="panel-foot">Streamed from the active deployment&apos;s container (<span className="mono">docker logs</span>). Refresh to pull the latest.</div>
+      <div className="panel-foot">
+        {live
+          ? "Live tail streamed from the active container over SSE."
+          : "Snapshot from the active deployment's container (docker logs). Toggle Live tail to stream."}
+      </div>
     </section>
   );
 }
@@ -561,7 +590,7 @@ function Environment({ slug }: { slug: string }) {
                           <span className="status status-building"><span className="dot" />sensitive</span>
                         </span>
                       ) : (
-                        <span className="mono">{v.value ?? "—"}</span>
+                        <span className="mono">{v.value ?? "-"}</span>
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>
@@ -722,7 +751,7 @@ function Branches({ slug }: { slug: string }) {
         <div className="panel-body stack">
           {!hasKey && <span className="status status-building"><span className="dot" />sign in to create branches</span>}
           <div className="field">
-            <label>Branch name <span className="faint">— lowercase, digits, underscore (1-50)</span></label>
+            <label>Branch name <span className="faint">(lowercase, digits, underscore, 1-50)</span></label>
             <input
               className="input mono"
               placeholder="staging"
@@ -736,7 +765,7 @@ function Branches({ slug }: { slug: string }) {
           <div className="row"><button className="btn btn-invert" disabled={!hasKey || busy || !valid} onClick={create}>{busy ? "Creating…" : "Create"}</button></div>
           {created && (
             <div className="field">
-              <label>Connection string for <span className="mono">{created.name}</span> <span className="faint">— shown once, treat as a secret</span></label>
+              <label>Connection string for <span className="mono">{created.name}</span> <span className="faint">(shown once, treat as a secret)</span></label>
               <pre className="code" style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{created.connectionString}</pre>
               <div className="row" style={{ gap: "var(--space-sm)" }}>
                 <CopyButton value={created.connectionString} label="Copy" />
@@ -808,13 +837,13 @@ function Database({ slug }: { slug: string }) {
 
       <section className="panel">
         <div className="panel-head">
-          <h3>Query <span className="faint" style={{ fontWeight: 400, fontSize: "var(--t-sm)" }}>— advanced (read-only SQL)</span></h3>
+          <h3>Query <span className="faint" style={{ fontWeight: 400, fontSize: "var(--t-sm)" }}>(advanced, read-only SQL)</span></h3>
           {result && <span className="mono faint" style={{ fontSize: "var(--t-sm)" }}>{result.rowCount} row{result.rowCount === 1 ? "" : "s"}</span>}
         </div>
         <div className="panel-body stack">
           {!hasKey && <span className="status status-building"><span className="dot" />sign in to run queries</span>}
           <div className="field">
-            <label>SQL <span className="faint">— read-only SELECT, max 1000 rows</span></label>
+            <label>SQL <span className="faint">(read-only SELECT, max 1000 rows)</span></label>
             <textarea
               className="input mono"
               placeholder="select * from users limit 50;"
@@ -840,7 +869,7 @@ function Database({ slug }: { slug: string }) {
                       <tr key={i}>
                         {cols.map((c) => {
                           const v = rrow[c];
-                          return <td key={c} className="mono" style={{ wordBreak: "break-word" }}>{v === null || v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</td>;
+                          return <td key={c} className="mono" style={{ wordBreak: "break-word" }}>{v === null || v === undefined ? "-" : typeof v === "object" ? JSON.stringify(v) : String(v)}</td>;
                         })}
                       </tr>
                     ))}

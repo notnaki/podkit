@@ -1,19 +1,14 @@
 import { useState } from "react";
 import { api, getToken } from "../api/client.ts";
 import type { Project } from "../api/client.ts";
-import { useApi, relativeTime } from "../lib/useApi.ts";
-
-function statusClass(status?: string | null) {
-  if (status === "running" || status === "ready") return "status status-ready";
-  if (status === "building") return "status status-building";
-  if (status) return "status status-error";
-  return "status status-none";
-}
+import { useApi, relativeTime, useLiveStatus, resolveStatus } from "../lib/useApi.ts";
 
 export function Projects() {
-  // Poll so live state (a project scaling to zero / waking) shows without a reload.
-  // 1.5s < the ~2s wake window, so a sample always lands inside it.
-  // ponytail: client polling; SSE/websocket if this gets chatty at scale.
+  // Each card subscribes to live status over SSE (see ProjectCard). This poll is
+  // the data fallback: it refreshes url/version/lastDeployed and covers cards
+  // whose SSE stream is down. 1.5s < the ~2s wake window, so a sample always
+  // lands inside it.
+  // ponytail: EventSource per card for live status, list poll as fallback.
   const projects = useApi(() => api.listProjects(), [], 1500);
   const [q, setQ] = useState("");
   const [creating, setCreating] = useState(false);
@@ -27,7 +22,7 @@ export function Projects() {
       <div className="page-head">
         <div>
           <h1>Projects</h1>
-          <p>Every app deployed to your podkit cloud — each gets a container, a routed URL, and its own Postgres.</p>
+          <p>Every app deployed to your podkit cloud. Each gets a container, a routed URL, and its own Postgres.</p>
         </div>
         <button className="btn btn-invert" onClick={() => setCreating((c) => !c)}>
           {creating ? "Cancel" : "Add New…"}
@@ -41,7 +36,9 @@ export function Projects() {
       </div>
 
       {projects.loading ? (
-        <div className="state">Loading projects…</div>
+        <div className="project-grid" aria-busy="true" aria-label="Loading projects">
+          {Array.from({ length: 6 }).map((_, i) => <ProjectCardSkeleton key={i} />)}
+        </div>
       ) : projects.error ? (
         <div className="state"><strong>{projects.error.code}</strong><span>{projects.error.message}</span></div>
       ) : list.length === 0 ? (
@@ -58,8 +55,32 @@ export function Projects() {
   );
 }
 
+// Calm loading: a card-shaped skeleton that matches ProjectCard's layout.
+function ProjectCardSkeleton() {
+  return (
+    <div className="skel-card" aria-hidden>
+      <div className="skel-row">
+        <span className="skeleton" style={{ width: 36, height: 36, borderRadius: "var(--radius-md)" }} />
+        <div className="skel-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: 6 }}>
+          <span className="skeleton" style={{ width: 120, height: 13 }} />
+          <span className="skeleton" style={{ width: 160, height: 11 }} />
+        </div>
+      </div>
+      <div className="skel-row" style={{ justifyContent: "space-between" }}>
+        <span className="skeleton" style={{ width: 70, height: 11 }} />
+        <span className="skeleton" style={{ width: 48, height: 11 }} />
+      </div>
+    </div>
+  );
+}
+
 function ProjectCard({ p }: { p: Project }) {
   const deployed = p.lastDeployedAt ? relativeTime(new Date(p.lastDeployedAt).getTime(), Date.now()) : null;
+  // Live status per card via SSE; the list poll is the data fallback (see Projects).
+  // Only deployed projects have a runtime to report on.
+  const live = useLiveStatus(p.version ? p.slug : null);
+  const { cls, label } = resolveStatus(live.status, p);
+
   return (
     <a className="project-card" href={`#/p/${encodeURIComponent(p.slug)}`}>
       <div className="pc-head">
@@ -70,9 +91,9 @@ function ProjectCard({ p }: { p: Project }) {
         </div>
       </div>
       <div className="pc-foot">
-        <span className={p.sleeping ? "status status-none" : statusClass(p.status)}>
+        <span className={cls}>
           <span className="dot" />
-          {p.sleeping ? "Sleeping" : p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
+          {label}
         </span>
         {p.version && <span className="mono faint" style={{ fontSize: "var(--t-xs)" }}>{p.version}</span>}
         {deployed && <span className="faint mono" style={{ fontSize: "var(--t-xs)" }}>{deployed}</span>}
@@ -119,7 +140,7 @@ function CreateProject({ onDone }: { onDone: () => void }) {
         <div className="panel-body stack">
           <div className="field">
             <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-              <label>Database connection string <span className="faint">— shown once, store it now</span></label>
+              <label>Database connection string <span className="faint">(shown once, store it now)</span></label>
               {result.connectionString && <CopyConn value={result.connectionString} />}
             </div>
             <div className="code" style={{ wordBreak: "break-all" }}>{result.connectionString ?? "(connection available via the API)"}</div>

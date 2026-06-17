@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, setToken } from "../api/client.ts";
+import { Logo } from "../components/Logo.tsx";
 
 export function Login({ onAuthed }: { onAuthed: () => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -40,9 +41,7 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
         <div className="panel" style={{ width: "100%", maxWidth: 380 }}>
           <div className="panel-head">
             <div className="row" style={{ gap: "var(--space-sm)" }}>
-              <span className="logo" aria-hidden>
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><rect x="1" y="1" width="7" height="7" rx="2.2" fill="currentColor" /><rect x="10" y="1" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="1" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="10" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /></svg>
-              </span>
+              <Logo size={18} />
               <h3>{isSignup ? "Create your account" : "Sign in to podkit"}</h3>
             </div>
           </div>

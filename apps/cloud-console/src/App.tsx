@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { api, getToken, clearToken } from "./api/client.ts";
 import type { Account } from "./api/client.ts";
 import { useApi } from "./lib/useApi.ts";
+import { Logo } from "./components/Logo.tsx";
 import { Projects } from "./pages/Projects.tsx";
 import { Project } from "./pages/Project.tsx";
 import { Login } from "./pages/Login.tsx";
@@ -118,9 +119,7 @@ function PublicNav({ account }: { account: Account | null }) {
   return (
     <header className="topnav topnav-public">
       <a className="brand" href="#/">
-        <span className="logo" aria-hidden>
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><rect x="1" y="1" width="7" height="7" rx="2.2" fill="currentColor" /><rect x="10" y="1" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="1" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="10" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /></svg>
-        </span>
+        <Logo size={18} />
         podkit
       </a>
       <span className="spacer" />
@@ -159,9 +158,7 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
     <div className="app">
       <header className="topnav">
         <a className="brand" href="#/">
-          <span className="logo" aria-hidden>
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><rect x="1" y="1" width="7" height="7" rx="2.2" fill="currentColor" /><rect x="10" y="1" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="1" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="10" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /></svg>
-          </span>
+          <Logo size={18} />
           podkit
         </a>
         <span className="crumb-sep">/</span>
