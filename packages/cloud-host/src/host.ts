@@ -63,6 +63,7 @@ import {
   signToken,
   verifyToken,
   resolveAuthSecret,
+  sendEmail,
 } from "@podkit/auth";
 
 export type CreateCloudOptions = {
@@ -97,6 +98,8 @@ export type Cloud = {
 // Token TTL constants (seconds).
 const ACCOUNT_TOKEN_TTL = 30 * 24 * 60 * 60; // 30 days (web account/session tokens)
 const CLI_TOKEN_TTL = 90 * 24 * 60 * 60; // 90 days (CLI/automation tokens)
+const PASSWORD_RESET_TTL = 60 * 60; // 1 hour (single-use reset links)
+const EMAIL_VERIFY_TTL = 24 * 60 * 60; // 24 hours (single-use verify links)
 
 function ok(data: unknown) {
   return { ok: true, data };
@@ -827,6 +830,67 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     return true;
   }
 
+  // Fully tear down a single project: stop its active container, drop its
+  // database + role and every branch DB, drop in-memory routing/preview state,
+  // then remove its control-plane rows. Best-effort throughout (a missing
+  // container/DB never blocks teardown). Shared by DELETE /v1/projects/:slug and
+  // the account-deletion cascade so both paths reclaim the same resources.
+  async function teardownProject(project: {
+    id: string;
+    slug: string;
+  }): Promise<void> {
+    const slug = project.slug;
+    const deployments = await store.listDeployments(project.id);
+    const active = findActiveDeployment(deployments);
+    if (active && active.containerId) {
+      try {
+        await stopContainer(active.containerId);
+      } catch {
+        // Ignore: container may already be gone.
+      }
+    }
+
+    const database = sanitizeSlug(slug);
+    try {
+      await dropDatabase({
+        adminConnectionString: opts.adminConnectionString,
+        database,
+        role: roleNameForDatabase(database),
+      });
+    } catch {
+      // Ignore: database may have never been provisioned or already dropped.
+    }
+
+    for (const branch of await store.listBranches(project.id)) {
+      try {
+        await dropBranchDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          database: branch.database,
+          role: roleNameForDatabase(branch.database),
+        });
+      } catch {
+        // Ignore: a branch DB may never have been created or already dropped.
+      }
+    }
+
+    const previews = activePreview.get(slug);
+    if (previews) {
+      for (const [branchName, containerName] of previews) {
+        await stopAndForget(containerName);
+        routeMap.delete(slug + "--" + branchName);
+      }
+      activePreview.delete(slug);
+    }
+
+    routeMap.delete(slug);
+    activeContainer.delete(slug);
+    for (const { domain } of await store.listDomains(project.id)) {
+      domainMap.delete(domain);
+    }
+
+    await store.deleteProject(project.id);
+  }
+
   // Max projects an account may own (0 = unlimited). Caps resource abuse when
   // the control-plane is exposed publicly. The machine API key is exempt.
   const MAX_PROJECTS_PER_ACCOUNT =
@@ -1548,6 +1612,29 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: fail("E_BAD_ARGS", "email already registered"),
       };
     }
+    // Issue + "send" an email-verification token (logged via the dev sink).
+    // ponytail: login is NOT gated on verification, so a failure here must not
+    //   block signup — best-effort, surface only via the dev log.
+    try {
+      const verifyToken = randomBytes(32).toString("hex");
+      await store.createEmailVerifyToken({
+        accountId: account.id,
+        token: verifyToken,
+        ttlSeconds: EMAIL_VERIFY_TTL,
+      });
+      await sendEmail({
+        to: account.email,
+        subject: "Verify your podkit email",
+        text:
+          `Use this token to verify your email: ${verifyToken}\n` +
+          `(Expires in ${Math.round(EMAIL_VERIFY_TTL / 3600)} hours.)`,
+      });
+    } catch (err) {
+      console.error(
+        "[podkit] email-verify token issue failed for " + account.email + ":",
+        err,
+      );
+    }
     const token = signToken(
       { accountId: account.id, email: account.email, jti: randomUUID() },
       authSecret,
@@ -1623,6 +1710,111 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     // Store the revocation with the token's own expiry so the row is self-GC'able.
     await store.revokeToken(jti, new Date(exp * 1000));
     return { status: 200, body: ok({ revoked: true }) };
+  });
+
+  // Request a password-reset link. ALWAYS returns 200 (whether or not the email
+  // exists) to avoid leaking which addresses are registered. Rate-limited per
+  // email so the endpoint can't be used to spam an inbox or grind the table.
+  router.register("POST", "/v1/auth/password/reset-request", async ({ body }) => {
+    const b = (body ?? {}) as { email?: string };
+    if (!b.email || typeof b.email !== "string") {
+      return { status: 400, body: fail("E_BAD_ARGS", "email required") };
+    }
+    const email = b.email;
+    // Generic 200 payload reused for every branch (anti-enumeration).
+    const accepted = {
+      status: 200 as const,
+      body: ok({ message: "if that email exists, a reset link has been sent" }),
+    };
+    if (!checkApiRateLimit("pwreset:" + email)) {
+      // Still a generic message; just signal slow-down with 429.
+      return {
+        status: 429,
+        body: fail("E_RATE_LIMITED", "too many reset requests, try again later"),
+      };
+    }
+    const account = await store.getAccountByEmail(email);
+    if (!account) return accepted; // Don't reveal non-existence.
+    const token = randomBytes(32).toString("hex");
+    await store.createPasswordResetToken({
+      accountId: account.id,
+      token,
+      ttlSeconds: PASSWORD_RESET_TTL,
+    });
+    await sendEmail({
+      to: email,
+      subject: "Reset your podkit password",
+      text:
+        `Use this token to reset your password: ${token}\n` +
+        `(Expires in ${Math.round(PASSWORD_RESET_TTL / 60)} minutes.)`,
+    });
+    return accepted;
+  });
+
+  // Complete a password reset with the single-use token. Enforces the same
+  // 8-char password floor as signup. Consuming the token also marks it used.
+  router.register("POST", "/v1/auth/password/reset", async ({ body }) => {
+    const b = (body ?? {}) as { token?: string; newPassword?: string };
+    if (!b.token || typeof b.token !== "string") {
+      return { status: 400, body: fail("E_BAD_ARGS", "token required") };
+    }
+    if (!b.newPassword || typeof b.newPassword !== "string") {
+      return { status: 400, body: fail("E_BAD_ARGS", "newPassword required") };
+    }
+    if (b.newPassword.length < 8) {
+      return {
+        status: 400,
+        body: fail("E_BAD_ARGS", "password must be at least 8 characters"),
+      };
+    }
+    const accountId = await store.consumePasswordResetToken(b.token);
+    if (!accountId) {
+      return {
+        status: 400,
+        body: fail(
+          "E_BAD_ARGS",
+          "token is invalid, expired, or already used",
+          "request a new reset link",
+        ),
+      };
+    }
+    await store.updateAccountPassword(accountId, hashPassword(b.newPassword));
+    return { status: 200, body: ok({ reset: true }) };
+  });
+
+  // Verify an email address with the single-use token issued at signup.
+  router.register("POST", "/v1/auth/verify-email", async ({ body }) => {
+    const b = (body ?? {}) as { token?: string };
+    if (!b.token || typeof b.token !== "string") {
+      return { status: 400, body: fail("E_BAD_ARGS", "token required") };
+    }
+    const accountId = await store.consumeEmailVerifyToken(b.token);
+    if (!accountId) {
+      return {
+        status: 400,
+        body: fail("E_BAD_ARGS", "token is invalid, expired, or already used"),
+      };
+    }
+    return { status: 200, body: ok({ verified: true }) };
+  });
+
+  // Delete the authenticated account: cascade-delete every project it owns
+  // (full per-project teardown), then the account + its sessions/tokens.
+  // Ownership is strictly the authenticated account (no admin override here).
+  router.register("DELETE", "/v1/account", async ({ headers }) => {
+    const auth = await accountFromAuth(headers);
+    if (!auth) return unauthorized();
+    const account = await store.getAccountById(auth.accountId);
+    // Idempotent-ish: an already-deleted account resolves to no-op success.
+    if (!account) return { status: 200, body: ok({ deleted: true }) };
+    const deleted = await store.deleteAccountCascade(
+      auth.accountId,
+      (project) => teardownProject(project),
+    );
+    return {
+      status: 200,
+      body: ok({ deleted: true, projects: deleted.map((p) => p.slug) }),
+    };
   });
 
   router.register("POST", "/v1/auth/cli/start", async () => {
@@ -1754,68 +1946,8 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (access === "unauth") return unauthorized();
       if (access === "forbidden") return forbidden();
 
-      // Stop the active production container if any — the most recent
-      // deploy/rollback (findActiveDeployment), not blindly the last row.
-      // Best effort: a pruned/already-stopped container must not block teardown.
-      const deployments = await store.listDeployments(project.id);
-      const active = findActiveDeployment(deployments);
-      if (active && active.containerId) {
-        try {
-          await stopContainer(active.containerId);
-        } catch {
-          // Ignore: container may already be gone.
-        }
-      }
-
-      // Drop the project's database + role. Best effort so a missing/already
-      // dropped database does not leave the control-plane row orphaned.
-      const database = sanitizeSlug(slug);
-      try {
-        await dropDatabase({
-          adminConnectionString: opts.adminConnectionString,
-          database,
-          role: roleNameForDatabase(database),
-        });
-      } catch {
-        // Ignore: database may have never been provisioned or already dropped.
-      }
-
-      // Drop every branch's Postgres DB + scoped role. Branches are separately
-      // provisioned databases that exist independently of any preview deploy, so
-      // they must be enumerated explicitly here or they leak after the project's
-      // control-plane rows are removed. listBranches omits the role, but it
-      // follows the documented `<database>_app` convention via
-      // roleNameForDatabase. Best-effort + idempotent (DROP ... IF EXISTS).
-      for (const branch of await store.listBranches(project.id)) {
-        try {
-          await dropBranchDatabase({
-            adminConnectionString: opts.adminConnectionString,
-            database: branch.database,
-            role: roleNameForDatabase(branch.database),
-          });
-        } catch {
-          // Ignore: a branch DB may never have been created or already dropped.
-        }
-      }
-
-      // Stop any live branch-preview containers and drop their routes.
-      const previews = activePreview.get(slug);
-      if (previews) {
-        for (const [branchName, containerName] of previews) {
-          await stopAndForget(containerName);
-          routeMap.delete(slug + "--" + branchName);
-        }
-        activePreview.delete(slug);
-      }
-
-      // Drop in-memory routing state for this project.
-      routeMap.delete(slug);
-      activeContainer.delete(slug);
-      for (const { domain } of await store.listDomains(project.id)) {
-        domainMap.delete(domain);
-      }
-
-      await store.deleteProject(project.id);
+      // Full teardown: container + DB(s) + routing state + control-plane rows.
+      await teardownProject(project);
 
       return { status: 200, body: ok({ deleted: slug }) };
     },

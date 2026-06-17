@@ -49,6 +49,25 @@ export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").unique().notNull(),
   passwordHash: text("password_hash"),
+  emailVerified: boolean("email_verified").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull(),
+  tokenHash: text("token_hash").unique().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const emailVerifyTokens = pgTable("email_verify_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull(),
+  tokenHash: text("token_hash").unique().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

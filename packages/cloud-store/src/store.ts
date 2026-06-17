@@ -1,9 +1,33 @@
 import { Pool } from "pg";
+import { createHash } from "node:crypto";
 import { resolveSecretsKey } from "@podkit/auth";
 import { encryptValue, decryptValue } from "./crypto.ts";
 
+// Hash an opaque bearer token (reset/verify link) for storage at rest. The
+// token is a 256-bit random value, so a plain SHA-256 (no salt/KDF) is enough:
+// an attacker with the DB still can't reverse a random preimage, and we look
+// rows up BY hash so there's no secret-dependent branch to time.
+function hashOpaqueToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+// Minimal query surface the store relies on — a subset of pg.Pool. Allowing an
+// injected pool keeps createStore connection-agnostic and lets tests back it
+// with an embedded Postgres (PGlite) so the cascade/account logic is verifiable
+// without Docker. ponytail: the subset we use; widen if the store grows needs.
+export type QueryablePool = {
+  query: <R extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ) => Promise<{ rows: R[]; rowCount?: number | null }>;
+  end: () => Promise<void>;
+};
+
 export type CreateStoreOptions = {
-  connectionString: string;
+  connectionString?: string;
+  // Inject a pre-built pool (e.g. PGlite-backed in tests). When set,
+  // connectionString is ignored.
+  pool?: QueryablePool;
 };
 
 export type Store = {
@@ -85,7 +109,34 @@ export type Store = {
   ) => Promise<{ id: string; email: string; passwordHash: string } | null>;
   getAccountById: (
     id: string,
-  ) => Promise<{ id: string; email: string } | null>;
+  ) => Promise<{ id: string; email: string; emailVerified: boolean } | null>;
+  updateAccountPassword: (id: string, passwordHash: string) => Promise<void>;
+  // Password reset: store only the token's SHA-256 hash; ttl in seconds.
+  createPasswordResetToken: (input: {
+    accountId: string;
+    token: string;
+    ttlSeconds: number;
+  }) => Promise<void>;
+  // Consume a reset token: returns the owning accountId iff the token exists,
+  // is unexpired and unused; marks it used (single-use). Null otherwise.
+  consumePasswordResetToken: (token: string) => Promise<string | null>;
+  // Email verification: same hashed-at-rest scheme as reset tokens.
+  createEmailVerifyToken: (input: {
+    accountId: string;
+    token: string;
+    ttlSeconds: number;
+  }) => Promise<void>;
+  // Consume a verify token (single-use, unexpired) and flip emailVerified.
+  // Returns the accountId on success, null otherwise.
+  consumeEmailVerifyToken: (token: string) => Promise<string | null>;
+  // Cascade-delete an account: its projects' control-plane rows (via the
+  // provided per-project teardown), then the account's auth artifacts and the
+  // account row. Returns the deleted projects so the caller can drop their
+  // databases/containers. Idempotent for an unknown id (returns []).
+  deleteAccountCascade: (
+    accountId: string,
+    teardownProject: (project: { id: string; slug: string }) => Promise<void>,
+  ) => Promise<Array<{ id: string; slug: string }>>;
   createCliSession: (input: {
     deviceCode: string;
     userCode: string;
@@ -138,7 +189,9 @@ export type Store = {
 };
 
 export function createStore(opts: CreateStoreOptions): Store {
-  const pool = new Pool({ connectionString: opts.connectionString });
+  const pool: QueryablePool =
+    opts.pool ??
+    (new Pool({ connectionString: opts.connectionString }) as QueryablePool);
 
   // Resolve the secrets-at-rest key once at store creation. When unset (dev),
   // encryption is disabled and ENV values are stored/read as plaintext. In
@@ -211,6 +264,35 @@ export function createStore(opts: CreateStoreOptions): Store {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         email text UNIQUE NOT NULL,
         password_hash text,
+        email_verified boolean NOT NULL DEFAULT false,
+        created_at timestamp DEFAULT now()
+      )
+    `);
+    // Idempotent backfill for control-planes provisioned before email verify.
+    await pool.query(
+      `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified boolean NOT NULL DEFAULT false`,
+    );
+    // Single-use, expiring password-reset tokens. Only the SHA-256 hash is
+    // stored; the plaintext is emailed and never persisted. used_at being set
+    // makes a token single-use. FK cascades on account deletion.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        token_hash text UNIQUE NOT NULL,
+        expires_at timestamptz NOT NULL,
+        used_at timestamptz,
+        created_at timestamp DEFAULT now()
+      )
+    `);
+    // Single-use, expiring email-verification tokens (same hashed-at-rest scheme).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_verify_tokens (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        token_hash text UNIQUE NOT NULL,
+        expires_at timestamptz NOT NULL,
+        used_at timestamptz,
         created_at timestamp DEFAULT now()
       )
     `);
@@ -592,14 +674,129 @@ export function createStore(opts: CreateStoreOptions): Store {
 
   async function getAccountById(
     id: string,
-  ): Promise<{ id: string; email: string } | null> {
-    const result = await pool.query<{ id: string; email: string }>(
-      `SELECT id, email FROM accounts WHERE id = $1 LIMIT 1`,
-      [id],
+  ): Promise<{ id: string; email: string; emailVerified: boolean } | null> {
+    let result;
+    try {
+      result = await pool.query<{
+        id: string;
+        email: string;
+        email_verified: boolean;
+      }>(
+        `SELECT id, email, email_verified FROM accounts WHERE id = $1 LIMIT 1`,
+        [id],
+      );
+    } catch {
+      // Malformed id (e.g. not a valid uuid) -> treat as not found.
+      return null;
+    }
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      email: row.email,
+      emailVerified: row.email_verified ?? false,
+    };
+  }
+
+  async function updateAccountPassword(
+    id: string,
+    passwordHash: string,
+  ): Promise<void> {
+    await pool.query(`UPDATE accounts SET password_hash = $1 WHERE id = $2`, [
+      passwordHash,
+      id,
+    ]);
+  }
+
+  async function createPasswordResetToken(input: {
+    accountId: string;
+    token: string;
+    ttlSeconds: number;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO password_reset_tokens (account_id, token_hash, expires_at)
+       VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+      [input.accountId, hashOpaqueToken(input.token), String(input.ttlSeconds)],
+    );
+  }
+
+  async function consumePasswordResetToken(
+    token: string,
+  ): Promise<string | null> {
+    // Atomically mark unexpired + unused token as used, returning its owner.
+    const result = await pool.query<{ account_id: string }>(
+      `UPDATE password_reset_tokens
+         SET used_at = now()
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+       RETURNING account_id`,
+      [hashOpaqueToken(token)],
+    );
+    const row = result.rows[0];
+    return row ? row.account_id : null;
+  }
+
+  async function createEmailVerifyToken(input: {
+    accountId: string;
+    token: string;
+    ttlSeconds: number;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO email_verify_tokens (account_id, token_hash, expires_at)
+       VALUES ($1, $2, now() + ($3 || ' seconds')::interval)`,
+      [input.accountId, hashOpaqueToken(input.token), String(input.ttlSeconds)],
+    );
+  }
+
+  async function consumeEmailVerifyToken(
+    token: string,
+  ): Promise<string | null> {
+    const result = await pool.query<{ account_id: string }>(
+      `UPDATE email_verify_tokens
+         SET used_at = now()
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+       RETURNING account_id`,
+      [hashOpaqueToken(token)],
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { id: row.id, email: row.email };
+    await pool.query(`UPDATE accounts SET email_verified = true WHERE id = $1`, [
+      row.account_id,
+    ]);
+    return row.account_id;
+  }
+
+  async function deleteAccountCascade(
+    accountId: string,
+    teardownProject: (project: { id: string; slug: string }) => Promise<void>,
+  ): Promise<Array<{ id: string; slug: string }>> {
+    // Find every project owned by this account (projects.owner stores the
+    // accountId for bearer-created projects).
+    let owned;
+    try {
+      owned = await pool.query<{ id: string; slug: string }>(
+        `SELECT id, slug FROM projects WHERE owner = $1`,
+        [accountId],
+      );
+    } catch {
+      // Malformed id -> nothing owned.
+      return [];
+    }
+    const projects = owned.rows.map((r) => ({ id: r.id, slug: r.slug }));
+    // Tear each project down (containers/DB + control-plane rows) via the
+    // caller-supplied teardown so this stays free of runtime/docker concerns.
+    for (const project of projects) {
+      await teardownProject(project);
+    }
+    // Reset/verify tokens cascade via FK ON DELETE CASCADE; deleting the account
+    // row removes the account itself. CLI sessions reference the account but
+    // don't block deletion (account_id has no FK), so clear them explicitly so
+    // no live CLI token outlives its account.
+    await pool.query(
+      `DELETE FROM cli_auth_sessions WHERE account_id = $1`,
+      [accountId],
+    );
+    await pool.query(`DELETE FROM accounts WHERE id = $1`, [accountId]);
+    return projects;
   }
 
   async function createCliSession(input: {
@@ -842,6 +1039,12 @@ export function createStore(opts: CreateStoreOptions): Store {
     createAccount,
     getAccountByEmail,
     getAccountById,
+    updateAccountPassword,
+    createPasswordResetToken,
+    consumePasswordResetToken,
+    createEmailVerifyToken,
+    consumeEmailVerifyToken,
+    deleteAccountCascade,
     createCliSession,
     getCliSessionByDeviceCode,
     getCliSessionByUserCode,
