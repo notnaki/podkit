@@ -5,6 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
+import { acceptLines, initLineTailState, type LineTailState } from "./tail.ts";
 
 type Method = "GET" | "POST" | "DELETE";
 
@@ -323,7 +324,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug>, env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug> [--follow|-f], env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
 
 // `deploy` is one-click: from your app directory, run `podkit cloud deploy <slug>`
 // with NO other flags. The CLI tars the current directory (excluding
@@ -360,6 +361,62 @@ function parseFlag(args: string[], flag: string): string | null {
     if (arg.startsWith(prefix)) return arg.slice(prefix.length);
   }
   return null;
+}
+
+// Fetches one batch of container logs for `slug` since an optional ISO cursor.
+// Returns the raw log blob (text). Injectable for tests via the deps param.
+export type CloudLogFetch = (slug: string, since: string | undefined) => Promise<string>;
+
+const fetchCloudLogs: CloudLogFetch = async (slug, since) => {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+  const res = await callControlPlane("GET", `/v1/projects/${slug}/logs${qs}`);
+  if (!res.ok) return "";
+  const data = res.data as { logs?: unknown };
+  return typeof data.logs === "string" ? data.logs : "";
+};
+
+export interface CloudFollowDeps {
+  fetch?: CloudLogFetch;
+  emit?: (line: string) => void;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+  intervalMs?: number;
+  stop?: () => boolean;
+  state?: LineTailState;
+}
+
+// Polls the cloud logs endpoint with a moving ISO `?since` cursor and prints
+// only new lines, de-duping the inclusive (second-granularity) overlap via
+// acceptLines. Runs until stop() is true (Ctrl-C kills the process in the CLI).
+//
+// ponytail: client-side polling tail — NOT server push/SSE/websocket. The
+// `?since` cursor is advanced to the request time each poll; docker's
+// second-granularity `--since` means the boundary second re-appears, which the
+// line de-dup window absorbs. Upgrade path: a streaming logs endpoint.
+export async function followCloudLogs(
+  slug: string,
+  deps: CloudFollowDeps = {},
+): Promise<Envelope<unknown>> {
+  const fetchLogs = deps.fetch ?? fetchCloudLogs;
+  const emit = deps.emit ?? ((line) => process.stdout.write(line + "\n"));
+  const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps.now ?? (() => new Date());
+  const intervalMs = deps.intervalMs ?? 1500;
+  const stop = deps.stop ?? (() => false);
+  const state = deps.state ?? initLineTailState();
+
+  let since: string | undefined;
+  while (!stop()) {
+    const requestedAt = now();
+    const blob = await fetchLogs(slug, since);
+    for (const line of acceptLines(state, blob)) emit(line);
+    // Advance the cursor to this request's time so the next poll only asks for
+    // newer lines; the de-dup window covers the inclusive-second overlap.
+    since = requestedAt.toISOString();
+    if (stop()) break;
+    await sleep(intervalMs);
+  }
+  return ok({ followed: true });
 }
 
 async function previewCommand(rest: string[]): Promise<Envelope<unknown>> {
@@ -872,6 +929,9 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
         return fail(
           new PodkitError("E_BAD_ARGS", "logs requires a slug", AVAILABLE),
         );
+      }
+      if (rest.includes("--follow") || rest.includes("-f")) {
+        return await followCloudLogs(slug);
       }
       return await callControlPlane("GET", `/v1/projects/${slug}/logs`);
     }

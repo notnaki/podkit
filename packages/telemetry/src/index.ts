@@ -8,3 +8,5 @@ export type {
   MetricsSnapshot,
   MetricsRegistry,
 } from "./metrics.ts";
+export { createTracer } from "./trace.ts";
+export type { Span, Tracer } from "./trace.ts";
