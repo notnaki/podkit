@@ -67,6 +67,25 @@ describe("dev server", () => {
   });
 });
 
+describe("dev server — SPA data endpoint", () => {
+  it("returns {route,data,layoutData} JSON when x-podkit-data:1 is set", async () => {
+    const res = await fetch(`${base}/blog/hello`, { headers: { "x-podkit-data": "1" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.json();
+    // route id matches the client route-table key (the source file).
+    expect(body.route).toBe("blog/[slug].tsx");
+    expect(body.data).toEqual({ slug: "hello" });
+    // Parallel layout-data array: root (no loader -> {}) then blog layout.
+    expect(body.layoutData).toEqual([{}, { section: "Blog" }]);
+  });
+
+  it("404s for an unmatched path even as a data request", async () => {
+    const res = await fetch(`${base}/nope`, { headers: { "x-podkit-data": "1" } });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("dev server — actions", () => {
   it("runs a route's action on POST: 303 redirect + Set-Cookie", async () => {
     const res = await fetch(`${base}/echo`, {

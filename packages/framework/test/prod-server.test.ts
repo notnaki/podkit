@@ -122,6 +122,16 @@ describe("prod server", () => {
     expect(body).toContain("<h2>Blog</h2>");
     expect(body).toContain('window.__PODKIT_LAYOUT_DATA__ = [{},{"section":"Blog"}]');
   });
+
+  it("returns SPA {route,data,layoutData} JSON for x-podkit-data:1", async () => {
+    const res = await fetch(`${base}/blog/hello`, { headers: { "x-podkit-data": "1" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.json();
+    expect(body.route).toBe("blog/[slug].tsx");
+    expect(body.data).toEqual({ slug: "hello" });
+    expect(body.layoutData).toEqual([{}, { section: "Blog" }]);
+  });
 });
 
 describe("prod build output", () => {

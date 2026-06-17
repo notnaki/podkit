@@ -103,6 +103,15 @@ export async function createDevServer(opts: DevServerOptions) {
         ));
         // Each layout runs its own loader with the same ctx as the page.
         const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+        // SPA navigation data request: same match/loader path, JSON instead of
+        // HTML. The route id matches the client route table key (the source file).
+        if (req.headers["x-podkit-data"] === "1") {
+          status = 200;
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ route: m.route.file, data, layoutData }));
+          return;
+        }
         // Stream the HTML response (head -> React shell -> tail).
         status = 200;
         renderPageToStream(res, mod, data, clientEntry, m.route.file, layoutMods, layoutData);
