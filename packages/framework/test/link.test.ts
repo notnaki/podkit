@@ -103,3 +103,40 @@ describe("Link — click interception", () => {
     expect(navigated).toEqual(["/about"]);
   });
 });
+
+describe("Link — prefetch on hover/focus", () => {
+  let prefetched: string[];
+
+  beforeEach(() => {
+    prefetched = [];
+    (window as unknown as { __podkitPrefetch?: (p: string) => void }).__podkitPrefetch = (p) =>
+      prefetched.push(p);
+  });
+
+  afterEach(() => {
+    delete (window as unknown as { __podkitPrefetch?: unknown }).__podkitPrefetch;
+    vi.restoreAllMocks();
+  });
+
+  function enterHandlerFor(props: Record<string, unknown>) {
+    const el = Link(props as never) as { props: { onMouseEnter: (e: unknown) => void } };
+    return el.props.onMouseEnter;
+  }
+
+  it("prefetches a same-origin path on mouse enter", () => {
+    enterHandlerFor({ href: "/blog/hello?a=1" })({});
+    expect(prefetched).toEqual(["/blog/hello?a=1"]);
+  });
+
+  it("does not prefetch cross-origin links", () => {
+    enterHandlerFor({ href: "https://example.com/x" })({});
+    expect(prefetched).toEqual([]);
+  });
+
+  it("still fires a caller-provided onMouseEnter", () => {
+    const spy = vi.fn();
+    enterHandlerFor({ href: "/about", onMouseEnter: spy })({});
+    expect(spy).toHaveBeenCalledOnce();
+    expect(prefetched).toEqual(["/about"]);
+  });
+});
