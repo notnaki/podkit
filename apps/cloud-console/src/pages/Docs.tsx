@@ -414,7 +414,7 @@ export const posts = pgTable("posts", {
         <thead><tr><th>Command</th><th>What it does</th></tr></thead>
         <tbody>
           <tr><td className="mono">podkit db migrate</td><td>Generate a migration from <code>app/db/schema.ts</code> and apply pending migrations (idempotent; tolerates "no schema changes").</td></tr>
-          <tr><td className="mono">podkit db pull</td><td>Introspect the live database and write a migration reflecting it — for adopting an existing database.</td></tr>
+          <tr><td className="mono">podkit db pull</td><td>Introspect the live database and write it back to code — a SQL migration plus a regenerated drizzle <code>schema.ts</code> — for adopting an existing database.</td></tr>
         </tbody>
       </table>
 
@@ -471,7 +471,7 @@ function CliPodkit() {
           <tr><td className="mono">podkit build [--appRoot &lt;dir&gt;] [--outDir &lt;dir&gt;]</td><td>Production build (client + per-route SSR + manifest) under <code>.podkit/build</code>.</td></tr>
           <tr><td className="mono">podkit start [--buildDir &lt;dir&gt;] [--port 3000]</td><td>Serve a build with the production server (no Vite).</td></tr>
           <tr><td className="mono">podkit db migrate</td><td>Generate + apply migrations from <code>app/db/schema.ts</code>.</td></tr>
-          <tr><td className="mono">podkit db pull</td><td>Introspect the database into a migration.</td></tr>
+          <tr><td className="mono">podkit db pull</td><td>Introspect the database into a migration + regenerated <code>schema.ts</code>.</td></tr>
           <tr><td className="mono">podkit auth signup --email &lt;e&gt; --password &lt;p&gt;</td><td>Create a local user.</td></tr>
           <tr><td className="mono">podkit auth login --email &lt;e&gt; --password &lt;p&gt;</td><td>Log in locally; mint a session token.</td></tr>
           <tr><td className="mono">podkit auth token --user &lt;id&gt; [--scope &lt;s&gt;]…</td><td>Issue an agent token with zero or more scopes.</td></tr>

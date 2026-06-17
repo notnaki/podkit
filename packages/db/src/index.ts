@@ -19,6 +19,6 @@ export { generateMigration } from "./migrations/generate.ts";
 
 export { applyMigrations } from "./migrations/apply.ts";
 
-export { pullSchema } from "./pull.ts";
+export { pullSchema, generateTsSchema } from "./pull.ts";
 
 export { enableRls, ownedBy, inOrg, isAgent, customPolicy } from "./rls/policy.ts";

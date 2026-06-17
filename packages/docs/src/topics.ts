@@ -54,7 +54,9 @@ TypeScript and podkit derives migrations from them.
   database matches the schema declared in code. Applied migrations are tracked
   and the command is idempotent.
 - \`podkit db pull\` — introspects the live database and writes the current
-  schema back to code, useful for adopting an existing database.
+  schema back to code: a versioned SQL migration plus a regenerated drizzle
+  \`schema.ts\` (importing from \`@podkit/db\`). Useful for adopting an existing
+  database into schema-as-code.
 
 Tables are written with helpers re-exported from \`@podkit/db\` (e.g.
 \`pgTable\`, \`text\`, \`integer\`, \`uuidPk\`). podkit also ships **row-level
