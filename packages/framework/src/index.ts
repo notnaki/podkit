@@ -6,6 +6,8 @@ export { createDevServer } from "./server/dev-server.ts";
 export { createProdServer } from "./server/prod-server.ts";
 export { buildApp } from "./build/app.ts";
 export { readManifest, writeManifest } from "./build/manifest.ts";
+export { Link } from "./client/link.tsx";
+export type { LinkProps } from "./client/link.tsx";
 export type { BuildAppOptions, BuildAppResult } from "./build/app.ts";
 export type { BuildManifest, BuildManifestRoute } from "./build/manifest.ts";
 export type { ProdServerOptions } from "./server/prod-server.ts";

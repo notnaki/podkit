@@ -170,6 +170,23 @@ export async function createProdServer(opts: ProdServerOptions) {
         return;
       }
 
+      // SPA navigation data request: run the same loader path and return JSON
+      // (skipping ISR/prerender, which serve HTML the client can't consume). The
+      // route id matches the client route table key (the source file).
+      if (req.headers["x-podkit-data"] === "1") {
+        const ctx = { params: m.params, url, auth };
+        const data = await runLoader(mod, ctx);
+        const layoutMods = await Promise.all(
+          (layoutsByPattern.get(m.route.pattern) ?? []).map((lf) => loadModule(lf)),
+        );
+        const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+        status = 200;
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ route: m.route.file, data, layoutData }));
+        return;
+      }
+
       // Prerender / ISR — only for prerendered (param-less) routes on GET/HEAD.
       const prerenderFile = prerenderByPattern.get(m.route.pattern);
       if (prerenderFile) {

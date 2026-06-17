@@ -19,17 +19,59 @@ export const CLIENT_ENTRY_SOURCE = `import { createElement } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { routes, layoutComponents } from "${VIRTUAL_ROUTES}";
 
-const w = window as unknown as { __PODKIT_ROUTE__?: string; __PODKIT_DATA__?: unknown; __PODKIT_LAYOUT_DATA__?: unknown[] };
-const entry = w.__PODKIT_ROUTE__ ? routes[w.__PODKIT_ROUTE__] : undefined;
-const root = document.getElementById("root");
-if (entry && root) {
-  const data = w.__PODKIT_DATA__;
-  const layoutData = w.__PODKIT_LAYOUT_DATA__ ?? [];
-  let tree = createElement(entry.component, { data });
+const w = window as unknown as {
+  __PODKIT_ROUTE__?: string;
+  __PODKIT_DATA__?: unknown;
+  __PODKIT_LAYOUT_DATA__?: unknown[];
+  __podkitNavigate?: (path: string) => void;
+};
+
+// Build the page tree wrapped by its layouts (mirrors buildTree on the server).
+function buildTree(routeId, data, layoutData) {
+  const entry = routes[routeId];
+  if (!entry) return null;
+  let tree = createElement(entry.component, { data: data });
   for (let i = entry.layouts.length - 1; i >= 0; i--) {
-    tree = createElement(layoutComponents[entry.layouts[i]], { data: layoutData[i], children: tree });
+    tree = createElement(layoutComponents[entry.layouts[i]], { data: (layoutData || [])[i], children: tree });
   }
-  hydrateRoot(root, tree);
+  return tree;
+}
+
+const root = document.getElementById("root");
+const entry = w.__PODKIT_ROUTE__ ? routes[w.__PODKIT_ROUTE__] : undefined;
+if (entry && root) {
+  const initial = buildTree(w.__PODKIT_ROUTE__, w.__PODKIT_DATA__, w.__PODKIT_LAYOUT_DATA__ ?? []);
+  const reactRoot = hydrateRoot(root, initial);
+
+  // SPA navigation: fetch the destination's loader data as JSON, rebuild the
+  // tree from the client route table, and render it into the existing root.
+  // ponytail: full-document fallback (location.assign) on ANY fetch/lookup
+  // failure — keeps correctness without re-implementing the server. Upgrade:
+  // surface an in-app error boundary instead of a hard nav.
+  // ponytail: no prefetch (no eager data fetch on hover/viewport) and no scroll
+  // restoration (back/forward keeps the current scroll) — both are pure UX
+  // polish. Upgrade: prefetch on link hover + restore scroll from history state.
+  async function render(path, replace) {
+    try {
+      const res = await fetch(path, { headers: { "x-podkit-data": "1" } });
+      if (!res.ok) throw new Error("data fetch " + res.status);
+      const payload = await res.json();
+      const tree = buildTree(payload.route, payload.data, payload.layoutData ?? []);
+      if (!tree) throw new Error("unknown route " + payload.route);
+      reactRoot.render(tree);
+    } catch {
+      window.location.assign(path);
+    }
+  }
+
+  w.__podkitNavigate = function (path) {
+    history.pushState({}, "", path);
+    void render(path);
+  };
+
+  window.addEventListener("popstate", function () {
+    void render(window.location.pathname + window.location.search + window.location.hash);
+  });
 }
 `;
 
