@@ -184,7 +184,7 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
         <a className="nav-link" href="#/docs">Docs</a>
         <span className={"status " + (health.loading ? "status-none" : connected ? "status-ready" : "status-error")}>
           <span className="dot" />
-          {health.loading ? "connecting" : connected ? "control-plane" : "offline"}
+          {health.loading ? "connecting" : connected ? "connected" : "offline"}
         </span>
         {account && <span className="muted mono" style={{ fontSize: "var(--t-sm)" }}>{account.email}</span>}
         <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>

@@ -2,6 +2,7 @@ export {
   buildImage,
   runContainer,
   stopContainer,
+  runningContainerNames,
   containerLogs,
   waitForReadiness,
 } from "./docker.ts";

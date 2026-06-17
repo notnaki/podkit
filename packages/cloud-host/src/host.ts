@@ -26,6 +26,7 @@ import {
   buildImage,
   runContainer,
   stopContainer,
+  runningContainerNames,
   containerLogs,
   isPodkitApp,
   buildPodkitApp,
@@ -184,6 +185,22 @@ function findActiveDeployment<T extends { kind: string }>(
 export function shouldReap(lastSeenMs: number, nowMs: number, idleMs: number): boolean {
   if (idleMs <= 0) return false;
   return nowMs - lastSeenMs >= idleMs;
+}
+
+// Given each prod route's container name and the set of actually-running
+// container names, return the route keys whose container has died out of band
+// (manual stop, crash, OOM, host reboot). Preview keys ("--") are excluded —
+// they don't cold-start. Pure so it can be unit-tested without Docker.
+export function deadRouteKeys(
+  routes: ReadonlyMap<string, string>,
+  running: ReadonlySet<string>,
+): string[] {
+  const dead: string[] = [];
+  for (const [key, name] of routes) {
+    if (key.includes("--")) continue;
+    if (!running.has(name)) dead.push(key);
+  }
+  return dead;
 }
 
 // Reject any SQL that is not a single, read-only SELECT. This is a deliberately
@@ -856,6 +873,22 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
   }
 
+  // A routed container vanished out of band (manual `docker stop`, crash, OOM,
+  // host reboot) while routeMap still pointed at it — that's why a stopped pod
+  // kept showing "running" and its URL 502'd. Drop the stale route so reads stop
+  // reporting it live; when cold-start is on, mark it sleeping and (if `wake`)
+  // bring a fresh container back. Previews (keys with "--") don't cold-start, so
+  // we just forget the route. Returns true when a cold-start recovery is queued.
+  function forgetDeadRoute(slug: string, wake: boolean): boolean {
+    routeMap.delete(slug);
+    activeContainer.delete(slug);
+    lastSeen.delete(slug);
+    if (slug.includes("--") || !coldStartEnabled) return false;
+    sleeping.add(slug);
+    if (wake) void wakeProject(slug);
+    return true;
+  }
+
   // Stop prod containers idle past the timeout, moving them to `sleeping` so the
   // next request cold-starts them. Previews (keys with "--") never scale to zero.
   // ponytail: prod-only scale-to-zero; previews stay up until teardown. Upgrade:
@@ -880,11 +913,41 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
   }
 
+  // Reconcile in-memory routes against what's actually running. A container that
+  // died out of band (manual `docker stop`, crash, OOM, host reboot) leaves a
+  // stale route, so reads would keep reporting the project "running" until a
+  // request happened to hit the dead upstream. This catches it with no traffic:
+  // demote dead routes to `sleeping` (no auto-wake — nobody asked for it; the
+  // next request cold-starts a fresh container).
+  async function reconcileLiveness(): Promise<void> {
+    if (!coldStartEnabled) return;
+    const routes = new Map<string, string>();
+    for (const key of routeMap.keys()) {
+      const name = activeContainer.get(key);
+      if (name) routes.set(key, name);
+    }
+    if (routes.size === 0) return;
+    let running: ReadonlySet<string>;
+    try {
+      running = await runningContainerNames();
+    } catch {
+      return; // docker unavailable this round; routes stay as-is
+    }
+    for (const key of deadRouteKeys(routes, running)) forgetDeadRoute(key, false);
+  }
+
   let reaperTimer: ReturnType<typeof setInterval> | undefined;
+  let livenessTimer: ReturnType<typeof setInterval> | undefined;
   if (coldStartEnabled) {
     // Sweep at least once a minute (and never slower than the timeout itself).
     reaperTimer = setInterval(reapIdleContainers, Math.min(idleMs, 60_000));
     reaperTimer.unref?.(); // never keep the process (or tests) alive on this
+    // Faster, cheaper liveness reconcile (one `docker ps`, only when something is
+    // routed) so a stopped/crashed container shows as sleeping within seconds —
+    // not just after a request happens to hit it. ponytail: polling at 5s; a
+    // docker-events subscription is the upgrade if this gets chatty at scale.
+    livenessTimer = setInterval(() => void reconcileLiveness(), Math.min(idleMs, 5_000));
+    livenessTimer.unref?.();
     // Mark already-deployed projects asleep so the first request wakes them —
     // this also makes prod recover lazily after a control-plane restart.
     void (async () => {
@@ -1334,6 +1397,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     onColdStart: (slug) => {
       void wakeProject(slug);
     },
+    onUpstreamError: (slug) => forgetDeadRoute(slug, true),
   });
 
   const router = createRouter();
@@ -1376,6 +1440,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           ...p,
           version: latest ? latest.version : null,
           status: latest ? latest.status : null,
+          // Live runtime state, distinct from the (immutable) deployment status:
+          // true when scale-to-zero has reaped the container and the next request
+          // will cold-start it. Always false when cold-start is off.
+          sleeping: coldStartEnabled && sleeping.has(p.slug),
           lastDeployedAt: latest ? (latest.createdAt ?? null) : null,
           url: latest ? publicUrl(p.slug) : null,
         };
@@ -2131,6 +2199,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       body: ok({
         project,
         latest,
+        sleeping: coldStartEnabled && sleeping.has(slug),
         url: latest ? publicUrl(slug) : null,
       }),
     };
@@ -3574,6 +3643,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
     async close(): Promise<void> {
       if (reaperTimer) clearInterval(reaperTimer);
+      if (livenessTimer) clearInterval(livenessTimer);
       for (const name of runningContainers) {
         try {
           await stopContainer(name);

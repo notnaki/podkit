@@ -11,7 +11,10 @@ function statusClass(status?: string | null) {
 }
 
 export function Projects() {
-  const projects = useApi(() => api.listProjects(), []);
+  // Poll so live state (a project scaling to zero / waking) shows without a reload.
+  // 1.5s < the ~2s wake window, so a sample always lands inside it.
+  // ponytail: client polling; SSE/websocket if this gets chatty at scale.
+  const projects = useApi(() => api.listProjects(), [], 1500);
   const [q, setQ] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -67,9 +70,9 @@ function ProjectCard({ p }: { p: Project }) {
         </div>
       </div>
       <div className="pc-foot">
-        <span className={statusClass(p.status)}>
+        <span className={p.sleeping ? "status status-none" : statusClass(p.status)}>
           <span className="dot" />
-          {p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
+          {p.sleeping ? "Sleeping" : p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
         </span>
         {p.version && <span className="mono faint" style={{ fontSize: "var(--t-xs)" }}>{p.version}</span>}
         {deployed && <span className="faint mono" style={{ fontSize: "var(--t-xs)" }}>{deployed}</span>}

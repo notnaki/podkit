@@ -67,6 +67,10 @@ export function createGateway(opts: {
   // Invoked when a request hits a scaled-to-zero project, to kick off a wake.
   // Fire-and-forget from the gateway's view; the implementation dedupes.
   onColdStart?: (slug: string) => void;
+  // Invoked when the upstream is unreachable (container stopped/crashed out of
+  // band) — lets the control-plane drop the stale route and recover. Returns
+  // true if recovery is under way (serve the holding page), false to 502.
+  onUpstreamError?: (slug: string) => boolean;
 }): {
   listen(port: number): Promise<{ url: string }>;
   close(): Promise<void>;
@@ -123,17 +127,24 @@ export function createGateway(opts: {
       },
     );
     upstream.on("error", (err: Error) => {
-      opts.onRequest?.({
-        slug,
-        statusCode: 502,
-        latencyMs: Date.now() - requestStart,
-      });
       if (!res.headersSent) {
+        // A connection-level failure means the container is gone (stopped,
+        // crashed, OOM-killed, host rebooted) while the route still pointed at
+        // it. Ask the control-plane to drop the stale route and recover; if it
+        // kicks a cold start, hold the browser instead of surfacing a 502.
+        const recovering = slug ? opts.onUpstreamError?.(slug) === true : false;
+        if (recovering) {
+          serveHoldingPage(res);
+          opts.onRequest?.({ slug, statusCode: 503, latencyMs: Date.now() - requestStart });
+          return;
+        }
         // Log the real cause server-side for debugging, but never leak internal
         // upstream details (loopback ports, container DNS names) to clients.
         console.error("gateway upstream error:", err.message);
+        opts.onRequest?.({ slug, statusCode: 502, latencyMs: Date.now() - requestStart });
         fail(res, 502, "E_UPSTREAM", "Upstream request failed");
       } else {
+        opts.onRequest?.({ slug, statusCode: 502, latencyMs: Date.now() - requestStart });
         res.destroy();
       }
     });
