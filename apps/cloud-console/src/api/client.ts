@@ -190,12 +190,6 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/db/tables/${encodeURIComponent(table)}`,
       { pk },
     ),
-  deployProject: (slug: string, contextDir: string, containerPort: number) =>
-    call<{ version: string; hostPort: number; url: string }>(
-      "POST",
-      `/v1/projects/${encodeURIComponent(slug)}/deploy`,
-      { contextDir, containerPort },
-    ),
   listEnv: (slug: string) =>
     call<{ env: EnvVar[] }>("GET", `/v1/projects/${encodeURIComponent(slug)}/env`),
   setEnv: (slug: string, key: string, value: string, sensitive: boolean) =>
@@ -231,17 +225,6 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/branches/${encodeURIComponent(name)}`,
     ),
   // Deploy a branch as an isolated preview (routes under <slug>--<branch>).
-  deployPreview: (
-    slug: string,
-    branchName: string,
-    contextDir: string,
-    containerPort: number,
-  ) =>
-    call<PreviewDeployResult>(
-      "POST",
-      `/v1/projects/${encodeURIComponent(slug)}/deploy-branch`,
-      { branchName, contextDir, containerPort },
-    ),
   // List a project's deployments, filtered to preview-kind rows only.
   listPreviewDeployments: async (slug: string) => {
     const res = await call<{ deployments: DeploymentHistoryItem[] }>(

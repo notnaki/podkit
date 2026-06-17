@@ -7,7 +7,7 @@ describe("docs registry", () => {
     const topics = listTopics();
     expect(topics).toEqual(arraySorted(topics));
     expect(topics).toEqual(
-      expect.arrayContaining(["routing", "db", "auth", "deploy", "cli"])
+      expect.arrayContaining(["routing", "db", "auth", "cli"])
     );
   });
 

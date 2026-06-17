@@ -4,9 +4,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "dependencies": {
-    "@podkit/deploy": "workspace:*",
     "@podkit/auth": "workspace:*",
-    "@podkit/telemetry": "workspace:*",
-    "@podkit/docs": "workspace:*"
+    "@podkit/telemetry": "workspace:*"
   }
 }

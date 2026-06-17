@@ -455,11 +455,6 @@ function CliPodkit() {
           <tr><td className="mono">podkit auth login --email &lt;e&gt; --password &lt;p&gt;</td><td>Log in locally; mint a session token.</td></tr>
           <tr><td className="mono">podkit auth token --user &lt;id&gt; [--scope &lt;s&gt;]…</td><td>Issue an agent token with zero or more scopes.</td></tr>
           <tr><td className="mono">podkit auth whoami --token &lt;t&gt;</td><td>Verify a token; print identity (incl. <code>isAgent</code>).</td></tr>
-          <tr><td className="mono">podkit deploy up</td><td>Build an artifact, publish a version, promote it (local registry).</td></tr>
-          <tr><td className="mono">podkit deploy promote &lt;versionId&gt;</td><td>Promote a published version to current.</td></tr>
-          <tr><td className="mono">podkit deploy rollback</td><td>Roll back to the previous version.</td></tr>
-          <tr><td className="mono">podkit deploy deployments</td><td>List local versions and the current one.</td></tr>
-          <tr><td className="mono">podkit deploy claim &lt;owner&gt;</td><td>Bind a deployment to an owner.</td></tr>
           <tr><td className="mono">podkit logs [--level &lt;l&gt;] [--route &lt;r&gt;] [--since &lt;ts&gt;]</td><td>Query structured log events from the local telemetry sink.</td></tr>
           <tr><td className="mono">podkit analytics query</td><td>Aggregate telemetry events into counts.</td></tr>
           <tr><td className="mono">podkit docs [topic|project]</td><td>List doc topics, read one, or describe the current project.</td></tr>

@@ -77,30 +77,6 @@ An agent token is a bearer credential sent on requests; podkit verifies the
 token, resolves the principal, and feeds that identity into RLS so a token only
 ever sees the data its policies allow.`,
   },
-  deploy: {
-    topic: "deploy",
-    title: "Deploy",
-    content: `# Deploy
-
-podkit deploys **immutable versions**: each build produces a versioned,
-content-addressed artifact that is never mutated after creation. Promotion and
-rollback just point an environment at a different existing version.
-
-- \`podkit deploy up\` — builds and uploads a new immutable version.
-- \`podkit deploy promote\` — points an environment (e.g. production) at a given
-  version, making it live.
-- \`podkit deploy rollback\` — re-promotes a previously deployed version, an
-  instant revert since the artifact still exists.
-- \`podkit deploy claim\` — claims/binds a project or domain to the deploy
-  target so subsequent deploys are authorized.
-
-Because versions are immutable, a rollback is deterministic: you always get back
-exactly the bits that were previously running.
-
-This \`podkit deploy\` family is the **local** deploy registry (versions on disk).
-To deploy to a hosted control-plane, see the \`cloud\` topic and
-\`podkit cloud deploy\`.`,
-  },
   cli: {
     topic: "cli",
     title: "CLI",

@@ -2,11 +2,12 @@
   "name": "@podkit/cli",
   "version": "0.0.0",
   "type": "module",
-  "bin": { "podkit": "./src/bin.ts" },
+  "bin": {
+    "podkit": "./src/bin.ts"
+  },
   "dependencies": {
     "@podkit/auth": "workspace:*",
     "@podkit/db": "workspace:*",
-    "@podkit/deploy": "workspace:*",
     "@podkit/docs": "workspace:*",
     "@podkit/framework": "workspace:*",
     "@podkit/telemetry": "workspace:*"
