@@ -23,10 +23,10 @@ typed CLI with a machine-readable `--json` envelope (for agents and scripts) and
 a Vercel-style web console (for humans). Same control-plane API underneath.
 
 ```
-┌────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │  podkit cloud (control-plane API)                            │
 │  projects · deploys · managed Postgres · domains · metrics   │
-└───────────────┬──────────────────────────┬──────────────────┘
+└───────────────┬──────────────────────────┬───────────────────┘
         CLI  (agents)              Web console  (humans)
 ```
 
