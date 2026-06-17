@@ -52,6 +52,12 @@ services:
       # and which browser origins may call the API (omit to allow any):
       PODKIT_CONSOLE_URL: ${PODKIT_CONSOLE_URL:-}
       PODKIT_CORS_ORIGINS: ${PODKIT_CORS_ORIGINS:-}
+      # Scale-to-zero: stop an idle project's container after N minutes; the next
+      # request cold-starts it behind a holding page. Default 0 (off); set in infra/.env.
+      PODKIT_IDLE_TIMEOUT_MIN: ${PODKIT_IDLE_TIMEOUT_MIN:-0}
+      # Aggregate per-account caps (0 = unlimited):
+      PODKIT_MAX_MEMORY_MB_PER_ACCOUNT: ${PODKIT_MAX_MEMORY_MB_PER_ACCOUNT:-0}
+      PODKIT_MAX_CONTAINERS_PER_ACCOUNT: ${PODKIT_MAX_CONTAINERS_PER_ACCOUNT:-0}
     ports:
       # Console + API. Put a TLS terminator (Caddy/Traefik) in front for HTTPS.
       - "${PODKIT_API_BIND:-8080}:8080"

@@ -41,6 +41,10 @@ services:
       # over this shared network (not via the host's loopback). App containers
       # are spawned onto it via the mounted Docker socket.
       PODKIT_APP_NETWORK: podkit
+      # Scale-to-zero: stop an idle project's container after N minutes; the next
+      # request cold-starts it behind an auto-refreshing holding page. Default 0
+      # (off) to match the opt-in feature; override, e.g. PODKIT_IDLE_TIMEOUT_MIN=15.
+      PODKIT_IDLE_TIMEOUT_MIN: "${PODKIT_IDLE_TIMEOUT_MIN:-0}"
     ports:
       - "8080:8080"
       - "8090:8090"
