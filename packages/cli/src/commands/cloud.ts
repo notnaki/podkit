@@ -2,12 +2,13 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { readFileSync, writeFileSync } from "node:fs";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
 import { acceptLines, initLineTailState, type LineTailState } from "./tail.ts";
 
-type Method = "GET" | "POST" | "DELETE";
+type Method = "GET" | "POST" | "DELETE" | "PUT";
 
 function resolveBase(): string {
   return readAuth()?.url ?? process.env.PODKIT_API_URL ?? "http://localhost:8080";
@@ -324,7 +325,7 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug> [--follow|-f], env, domains, branches, preview <slug> <branchName>, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug> [--follow|-f], env, domains, branches, preview <slug> <branchName>, blob, login [--url <url>], logout, whoami";
 
 // `deploy` is one-click: from your app directory, run `podkit cloud deploy <slug>`
 // with NO other flags. The CLI tars the current directory (excluding
@@ -352,6 +353,9 @@ const BRANCHES_HINT =
 
 const PREVIEW_HINT =
   "podkit cloud preview <slug> <branchName> [--contextDir=<dir>] [--containerPort=<port>] | preview list <slug>";
+
+const BLOB_HINT =
+  "podkit cloud blob put <slug> <key> <file> | get <slug> <key> [outFile] | ls <slug> [--table] | rm <slug> <key> | url <slug> <key> [--exp <sec>]";
 
 // Parse a `--flag=value` style option out of an argv slice. Returns null when
 // the flag is absent or has no value.
@@ -795,6 +799,136 @@ async function login(rest: string[]): Promise<Envelope<unknown>> {
   return fail(new PodkitError("E_BAD_ARGS", "login timed out"));
 }
 
+async function blobCommand(rest: string[], wantsTable: boolean): Promise<Envelope<unknown>> {
+  const [action, ...blobRest] = rest;
+
+  if (action === "put") {
+    const [slug, key, filePath] = blobRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "blob put requires a slug", BLOB_HINT));
+    if (!key) return fail(new PodkitError("E_BAD_ARGS", "blob put requires a key", BLOB_HINT));
+    if (!filePath) return fail(new PodkitError("E_BAD_ARGS", "blob put requires a file path", BLOB_HINT));
+    let fileData: Buffer;
+    try {
+      fileData = readFileSync(filePath);
+    } catch {
+      return fail(new PodkitError("E_BAD_ARGS", "could not read file: " + filePath, BLOB_HINT));
+    }
+    // Infer a rough content-type from extension; no dep needed.
+    // ponytail: fixed map; upgrade to mime-types lib or --content-type flag for full coverage.
+    const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+    const contentTypeMap: Record<string, string> = {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      webp: "image/webp",
+      svg: "image/svg+xml",
+      pdf: "application/pdf",
+      txt: "text/plain",
+      html: "text/html",
+      css: "text/css",
+      js: "text/javascript",
+      json: "application/json",
+      wasm: "application/wasm",
+    };
+    const contentType = contentTypeMap[ext] ?? "application/octet-stream";
+    const dataBase64 = fileData.toString("base64");
+    return callControlPlane(
+      "PUT",
+      `/v1/projects/${encodeURIComponent(slug)}/blobs/${encodeURIComponent(key)}`,
+      { contentType, dataBase64 },
+    );
+  }
+
+  if (action === "get") {
+    const [slug, key, outFile] = blobRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "blob get requires a slug", BLOB_HINT));
+    if (!key) return fail(new PodkitError("E_BAD_ARGS", "blob get requires a key", BLOB_HINT));
+    // Get a signed URL for this blob, then fetch the raw bytes.
+    const urlRes = await callControlPlane(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/blobs/${encodeURIComponent(key)}/url`,
+    );
+    if (!urlRes.ok) return urlRes;
+    const blobUrl = (urlRes.data as { url?: string })?.url;
+    if (!blobUrl) return fail(new PodkitError("E_BAD_STATE", "no url in response"));
+    const base = resolveBase();
+    let fetchRes: Response;
+    try {
+      fetchRes = await fetch(base + blobUrl);
+    } catch {
+      return fail(new PodkitError("E_NETWORK", "could not fetch blob bytes"));
+    }
+    if (!fetchRes.ok) {
+      return fail(new PodkitError("E_BAD_STATE", "blob download failed: HTTP " + fetchRes.status));
+    }
+    const bytes = Buffer.from(await fetchRes.arrayBuffer());
+    if (outFile) {
+      try {
+        writeFileSync(outFile, bytes);
+      } catch {
+        return fail(new PodkitError("E_BAD_STATE", "could not write to: " + outFile));
+      }
+      return ok({ saved: outFile, size: bytes.length });
+    }
+    // Print to stdout as base64 when no outFile given (safe for any binary content).
+    process.stdout.write(bytes.toString("base64") + "\n");
+    return ok({ size: bytes.length });
+  }
+
+  if (action === "ls") {
+    const [slug] = blobRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "blob ls requires a slug", BLOB_HINT));
+    const res = await callControlPlane("GET", `/v1/projects/${encodeURIComponent(slug)}/blobs`);
+    if (res.ok && wantsTable) {
+      const data = res.data as { blobs?: unknown[] };
+      const list = Array.isArray(data?.blobs) ? data.blobs : [];
+      const rows: Record<string, string>[] = list.map((b: unknown) => {
+        const blob = b as { key?: unknown; contentType?: unknown; size?: unknown; createdAt?: unknown };
+        return {
+          key: String(blob?.key ?? ""),
+          contentType: String(blob?.contentType ?? ""),
+          size: String(blob?.size ?? ""),
+          createdAt: String(blob?.createdAt ?? ""),
+        };
+      });
+      return ok(formatTable(rows));
+    }
+    return res;
+  }
+
+  if (action === "rm") {
+    const [slug, key] = blobRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "blob rm requires a slug", BLOB_HINT));
+    if (!key) return fail(new PodkitError("E_BAD_ARGS", "blob rm requires a key", BLOB_HINT));
+    return callControlPlane(
+      "DELETE",
+      `/v1/projects/${encodeURIComponent(slug)}/blobs/${encodeURIComponent(key)}`,
+    );
+  }
+
+  if (action === "url") {
+    const [slug, key] = blobRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "blob url requires a slug", BLOB_HINT));
+    if (!key) return fail(new PodkitError("E_BAD_ARGS", "blob url requires a key", BLOB_HINT));
+    const expIdx = blobRest.indexOf("--exp");
+    const expSec = expIdx !== -1 ? blobRest[expIdx + 1] : null;
+    const qs = expSec ? `?expSec=${encodeURIComponent(expSec)}` : "";
+    return callControlPlane(
+      "GET",
+      `/v1/projects/${encodeURIComponent(slug)}/blobs/${encodeURIComponent(key)}/url${qs}`,
+    );
+  }
+
+  return fail(
+    new PodkitError(
+      "E_BAD_ARGS",
+      action ? `Unknown blob action: ${action}` : "blob requires an action",
+      BLOB_HINT,
+    ),
+  );
+}
+
 export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
   const [subcommand, ...args1] = args;
   const wantsTable = args1.includes("--table");
@@ -950,6 +1084,10 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
 
     if (subcommand === "preview") {
       return await previewCommand(rest);
+    }
+
+    if (subcommand === "blob") {
+      return await blobCommand(rest, wantsTable);
     }
 
     if (subcommand === "login") {
