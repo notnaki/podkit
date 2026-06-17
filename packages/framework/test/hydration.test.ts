@@ -61,13 +61,15 @@ describe("client hydration", () => {
     const html = await (await fetch(`${base}/counter`)).text();
     const rootInner = html.match(/<div id="root">([\s\S]*?)<\/div><script>/)![1];
     const data = JSON.parse(html.match(/__PODKIT_DATA__ = ([\s\S]*?);window\.__PODKIT_ROUTE__/)![1]);
-    const route = JSON.parse(html.match(/__PODKIT_ROUTE__ = ([\s\S]*?)<\/script>/)![1]);
+    const route = JSON.parse(html.match(/__PODKIT_ROUTE__ = ([\s\S]*?);window\.__PODKIT_LAYOUT_DATA__/)![1]);
+    const layoutData = JSON.parse(html.match(/__PODKIT_LAYOUT_DATA__ = ([\s\S]*?)<\/script>/)![1]);
 
     // Recreate the browser's starting state: server HTML in #root + globals.
     document.body.innerHTML = `<div id="root">${rootInner}</div>`;
-    const w = window as unknown as { __PODKIT_DATA__: unknown; __PODKIT_ROUTE__: string };
+    const w = window as unknown as { __PODKIT_DATA__: unknown; __PODKIT_ROUTE__: string; __PODKIT_LAYOUT_DATA__: unknown[] };
     w.__PODKIT_DATA__ = data;
     w.__PODKIT_ROUTE__ = route;
+    w.__PODKIT_LAYOUT_DATA__ = layoutData;
     (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
 
     const button = document.querySelector("button")!;

@@ -94,13 +94,16 @@ export async function createDevServer(opts: DevServerOptions) {
           status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
           return;
         }
-        const data = await runLoader(mod, { params: m.params, url, auth });
+        const ctx = { params: m.params, url, auth };
+        const data = await runLoader(mod, ctx);
         const layoutMods = (await Promise.all(
           findLayouts(allFiles, m.route.file).map(
             (lf) => vite.ssrLoadModule(join(routesDir, lf)) as Promise<RouteModule>,
           ),
         ));
-        const html = await renderPage(mod, data, clientEntry, m.route.file, layoutMods);
+        // Each layout runs its own loader with the same ctx as the page.
+        const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+        const html = await renderPage(mod, data, clientEntry, m.route.file, layoutMods, layoutData);
         status = 200;
         res.statusCode = 200;
         res.setHeader("content-type", "text/html");

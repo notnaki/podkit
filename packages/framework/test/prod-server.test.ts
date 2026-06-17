@@ -115,6 +115,13 @@ describe("prod server", () => {
       /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
     );
   });
+
+  it("runs each layout's own loader and embeds layout data for hydration", async () => {
+    const res = await fetch(`${base}/blog/hello`);
+    const body = await res.text();
+    expect(body).toContain("<h2>Blog</h2>");
+    expect(body).toContain('window.__PODKIT_LAYOUT_DATA__ = [{},{"section":"Blog"}]');
+  });
 });
 
 describe("prod build output", () => {

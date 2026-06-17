@@ -41,13 +41,31 @@ describe("renderPage", () => {
     );
   });
 
-  it("passes loader data to layouts", async () => {
-    const page = { default: () => createElement("main", null, "p") };
-    const layout = {
-      default: (p: { data: { tag: string }; children: unknown }) =>
-        createElement("div", null, p.data.tag, p.children as never),
+  it("passes each layout its OWN loader data (not the page data)", async () => {
+    const page = {
+      default: (p: { data: { tag: string } }) => createElement("main", null, p.data.tag),
     };
-    const html = await renderPage(page, { tag: "T" }, "/e.js", "index.tsx", [layout]);
-    expect(html).toContain("<div>T<main>p</main></div>");
+    const layout = {
+      default: (p: { data: { lt: string }; children: unknown }) =>
+        createElement("div", null, p.data.lt, p.children as never),
+    };
+    // Page data and layout data differ: layout must render its own ("L"), page "P".
+    const html = await renderPage(
+      page,
+      { tag: "P" },
+      "/e.js",
+      "index.tsx",
+      [layout],
+      [{ lt: "L" }],
+    );
+    expect(html).toContain("<div>L<main>P</main></div>");
+    // Layout data is embedded for hydration.
+    expect(html).toContain('window.__PODKIT_LAYOUT_DATA__ = [{"lt":"L"}]');
+  });
+
+  it("embeds an empty layout-data array when no layouts have loaders", async () => {
+    const mod = { default: () => createElement("h1", null, "x") };
+    const html = await renderPage(mod, {}, "/e.js", "index.tsx");
+    expect(html).toContain("window.__PODKIT_LAYOUT_DATA__ = []");
   });
 });

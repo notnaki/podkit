@@ -140,11 +140,14 @@ export async function createProdServer(opts: ProdServerOptions) {
         status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
         return;
       }
-      const data = await runLoader(mod, { params: m.params, url, auth });
+      const ctx = { params: m.params, url, auth };
+      const data = await runLoader(mod, ctx);
       const layoutMods = await Promise.all(
         (layoutsByPattern.get(m.route.pattern) ?? []).map((lf) => loadModule(lf)),
       );
-      const html = await renderPage(mod, data, manifest.clientEntry, m.route.file, layoutMods);
+      // Each layout runs its own loader with the same ctx as the page.
+      const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+      const html = await renderPage(mod, data, manifest.clientEntry, m.route.file, layoutMods, layoutData);
       status = 200;
       res.statusCode = 200;
       res.setHeader("content-type", "text/html");
