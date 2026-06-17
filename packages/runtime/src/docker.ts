@@ -209,6 +209,21 @@ export async function stopContainer(name: string): Promise<void> {
   }
 }
 
+/**
+ * Names of all currently-running containers. Used to reconcile in-memory routes
+ * against reality so a container that died out of band (manual stop, crash,
+ * OOM, host reboot) is detected even when no request has hit it yet.
+ */
+export async function runningContainerNames(): Promise<Set<string>> {
+  const { stdout } = await execFileAsync("docker", ["ps", "--format", "{{.Names}}"]);
+  return new Set(
+    stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
 export interface ContainerLogsOptions {
   /** Limit output to the last N lines (maps to `docker logs --tail N`). */
   tail?: number;
