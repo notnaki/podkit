@@ -177,5 +177,4 @@ Read these before relying on podkit for anything serious:
 
 ## License
 
-Not yet licensed (defaults to all-rights-reserved). A license will be added
-before/with the public release.
+[MIT](LICENSE) © Nuh Naci Kusculu
