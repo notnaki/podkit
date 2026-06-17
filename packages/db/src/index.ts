@@ -22,3 +22,6 @@ export { applyMigrations } from "./migrations/apply.ts";
 export { pullSchema, generateTsSchema } from "./pull.ts";
 
 export { enableRls, ownedBy, inOrg, isAgent, customPolicy } from "./rls/policy.ts";
+
+export { createRestHandler } from "./rest/handler.ts";
+export type { RestHandler, RestHandlerOptions } from "./rest/handler.ts";
