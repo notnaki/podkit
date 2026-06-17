@@ -100,3 +100,31 @@ describe("createGateway", () => {
     30000,
   );
 });
+
+describe("createGateway — cold start", () => {
+  it(
+    "serves a holding page and triggers onColdStart for a sleeping route",
+    async () => {
+      const woken: string[] = [];
+      const g = createGateway({
+        resolve: ({ path }) =>
+          path.startsWith("/_p/asleep") ? { sleeping: true, slug: "asleep" } : null,
+        onColdStart: (slug) => woken.push(slug),
+      });
+      const { url } = await g.listen(0);
+      try {
+        const res = await fetch(url + "/_p/asleep/", { redirect: "manual" });
+        expect(res.status).toBe(503);
+        expect(res.headers.get("retry-after")).toBe("2");
+        const body = await res.text();
+        expect(body).toContain('http-equiv="refresh"');
+        expect(body).toContain("Starting up");
+        // The wake was kicked off exactly once for the resolved slug.
+        expect(woken).toEqual(["asleep"]);
+      } finally {
+        await g.close();
+      }
+    },
+    30000,
+  );
+});
