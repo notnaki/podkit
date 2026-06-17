@@ -103,7 +103,6 @@ function readJsonBody(req: IncomingMessage): Promise<{ value: unknown } | { erro
 function pickWritable(
   body: Record<string, unknown>,
   columns: ColumnMeta[],
-  pk: ColumnMeta | undefined,
   requireNotNull: boolean,
 ): { values: Record<string, unknown> } | { error: string } {
   const byKey = new Map(columns.map((c) => [c.key, c]));
@@ -228,7 +227,7 @@ export function createRestHandler(
           sendJson(res, 400, { error: "body must be a JSON object" });
           return true;
         }
-        const picked = pickWritable(parsed.value, columns, pk, true);
+        const picked = pickWritable(parsed.value, columns, true);
         if ("error" in picked) {
           sendJson(res, 400, { error: picked.error });
           return true;
@@ -252,7 +251,7 @@ export function createRestHandler(
           sendJson(res, 400, { error: "body must be a JSON object" });
           return true;
         }
-        const picked = pickWritable(parsed.value, columns, pk, false);
+        const picked = pickWritable(parsed.value, columns, false);
         if ("error" in picked) {
           sendJson(res, 400, { error: picked.error });
           return true;

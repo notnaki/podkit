@@ -57,6 +57,33 @@ describe("dev server", () => {
       /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
     );
   });
+
+  it("runs each layout's own loader and embeds layout data for hydration", async () => {
+    const post = await (await fetch(`${base}/blog/hello`)).text();
+    // Blog layout's loader returns { section: "Blog" }, rendered in its <h2>.
+    expect(post).toContain("<h2>Blog</h2>");
+    // Layout data is embedded as a parallel array (root has no loader -> {}).
+    expect(post).toContain('window.__PODKIT_LAYOUT_DATA__ = [{},{"section":"Blog"}]');
+  });
+});
+
+describe("dev server — SPA data endpoint", () => {
+  it("returns {route,data,layoutData} JSON when x-podkit-data:1 is set", async () => {
+    const res = await fetch(`${base}/blog/hello`, { headers: { "x-podkit-data": "1" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = await res.json();
+    // route id matches the client route-table key (the source file).
+    expect(body.route).toBe("blog/[slug].tsx");
+    expect(body.data).toEqual({ slug: "hello" });
+    // Parallel layout-data array: root (no loader -> {}) then blog layout.
+    expect(body.layoutData).toEqual([{}, { section: "Blog" }]);
+  });
+
+  it("404s for an unmatched path even as a data request", async () => {
+    const res = await fetch(`${base}/nope`, { headers: { "x-podkit-data": "1" } });
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("dev server — actions", () => {

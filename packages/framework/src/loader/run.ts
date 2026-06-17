@@ -4,6 +4,10 @@ export interface RouteModule {
   default?: unknown;
   loader?: (ctx: LoaderContext) => unknown | Promise<unknown>;
   action?: (ctx: ActionContext) => ActionResult | Promise<ActionResult>;
+  /** `export const prerender = true` — render to static HTML at build time. */
+  prerender?: boolean;
+  /** `export const revalidate = <seconds>` — ISR window for the prod server. */
+  revalidate?: number;
 }
 
 export async function runLoader(mod: RouteModule, ctx: LoaderContext): Promise<unknown> {

@@ -2,9 +2,12 @@ import { build as viteBuild } from "vite";
 import react from "@vitejs/plugin-react";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildRouteTable, findLayouts } from "../routing/discover.ts";
 import { podkitPlugins, CLIENT_ENTRY_SOURCE } from "./plugin.ts";
 import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
+import { runLoader, type RouteModule } from "../loader/run.ts";
+import { renderPage } from "../render/ssr.ts";
 
 function listFiles(dir: string, root = dir): string[] {
   if (!existsSync(dir)) return [];
@@ -170,6 +173,40 @@ export async function buildApp(
     serverFile: `routes/${ssrSlug(route.file)}-SSR.js`,
     layouts: findLayouts(allFiles, route.file).map((lf) => `routes/${ssrSlug(lf)}-SSR.js`),
   }));
+
+  // (6) Static prerender + ISR window discovery. For routes that
+  // `export const prerender = true` AND have no dynamic params, render to static
+  // HTML at build time so the prod server can serve it directly. A route may
+  // also `export const revalidate = <seconds>` to opt into ISR (recorded for
+  // the prod server's in-process stale-while-revalidate cache).
+  // ponytail: only param-less routes are prerendered (dynamic routes would need
+  // a getStaticPaths-style enumeration). Upgrade: add a params provider export
+  // and loop it here. ISR cache lives in the prod server process (see there).
+  const prerenderDir = join(outDir, "prerendered");
+  for (const route of routes) {
+    const mod = (await import(
+      pathToFileURL(join(serverOutDir, route.serverFile)).href
+    )) as RouteModule;
+    if (typeof mod.revalidate === "number") route.revalidate = mod.revalidate;
+    if (mod.prerender !== true || route.params.length > 0) continue;
+
+    const url = new URL("http://localhost" + route.pattern);
+    const ctx = { params: {}, url, auth: null };
+    const data = await runLoader(mod, ctx);
+    const layoutMods = await Promise.all(
+      (route.layouts ?? []).map(
+        async (lf) =>
+          (await import(pathToFileURL(join(serverOutDir, lf)).href)) as RouteModule,
+      ),
+    );
+    const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+    const html = await renderPage(mod, data, clientEntry, route.file, layoutMods, layoutData);
+
+    const htmlName = ssrSlug(route.file) + ".html";
+    mkdirSync(prerenderDir, { recursive: true });
+    writeFileSync(join(prerenderDir, htmlName), html);
+    route.prerender = "prerendered/" + htmlName;
+  }
 
   const manifest: BuildManifest = {
     routes,

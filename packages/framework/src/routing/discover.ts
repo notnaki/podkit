@@ -45,9 +45,9 @@ export function buildRouteTable(files: string[]): Route[] {
  * `app/routes/_layout.tsx` wraps every route; `app/routes/<dir>/_layout.tsx`
  * wraps routes under `<dir>`. For `dash/settings/index.tsx` the chain is
  * [`_layout.tsx`, `dash/_layout.tsx`, `dash/settings/_layout.tsx`] — whichever
- * of those exist. Layouts are presentational: they receive `{ children, data }`
- * (the route's loader data), not their own loader.
- * ponytail: no per-layout loaders yet; add a layout `loader` + data merge when one needs its own server data.
+ * of those exist. Each layout receives `{ children, data }` where `data` is its
+ * OWN loader result (run with the same context as the page), or `{}` if it has
+ * no loader.
  */
 export function findLayouts(files: string[], routeFile: string): string[] {
   const have = new Set(files);

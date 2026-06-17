@@ -25,3 +25,11 @@ export { enableRls, ownedBy, inOrg, isAgent, customPolicy } from "./rls/policy.t
 
 export { createRestHandler } from "./rest/handler.ts";
 export type { RestHandler, RestHandlerOptions } from "./rest/handler.ts";
+
+export { createRealtime, assertChannel, notifyTriggerSql } from "./realtime.ts";
+export type {
+  Realtime,
+  CreateRealtimeOptions,
+  NotifyHandler,
+  Unsubscribe,
+} from "./realtime.ts";
