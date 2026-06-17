@@ -11,7 +11,10 @@ function statusClass(status?: string | null) {
 }
 
 export function Projects() {
-  const projects = useApi(() => api.listProjects(), []);
+  // Poll so live state (a project scaling to zero / waking) shows without a reload.
+  // 1.5s < the ~2s wake window, so a sample always lands inside it.
+  // ponytail: client polling; SSE/websocket if this gets chatty at scale.
+  const projects = useApi(() => api.listProjects(), [], 1500);
   const [q, setQ] = useState("");
   const [creating, setCreating] = useState(false);
 

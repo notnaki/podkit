@@ -7,7 +7,7 @@ const TABS = ["Overview", "Deployments", "Database", "Observability", "Settings"
 type Tab = (typeof TABS)[number];
 
 export function Project({ slug }: { slug: string }) {
-  const detail = useApi(() => api.getProject(slug), [slug]);
+  const detail = useApi(() => api.getProject(slug), [slug], 1500);
   const [tab, setTab] = useState<Tab>("Overview");
 
   const url = detail.data?.url ?? null;
