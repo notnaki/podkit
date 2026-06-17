@@ -7,7 +7,7 @@ import { verifyToken } from "@podkit/auth";
 import { createSink } from "@podkit/telemetry";
 import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
-import { renderPageToStream } from "../render/ssr.ts";
+import { renderPage, renderPageToStream } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
 import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
@@ -63,10 +63,24 @@ export async function createProdServer(opts: ProdServerOptions) {
   }));
   const serverFileByPattern = new Map<string, string>();
   const layoutsByPattern = new Map<string, string[]>();
+  const prerenderByPattern = new Map<string, string>();
+  const revalidateByPattern = new Map<string, number>();
   for (const r of manifest.routes) {
     serverFileByPattern.set(r.pattern, r.serverFile);
     layoutsByPattern.set(r.pattern, r.layouts ?? []);
+    if (r.prerender) prerenderByPattern.set(r.pattern, r.prerender);
+    if (typeof r.revalidate === "number") revalidateByPattern.set(r.pattern, r.revalidate);
   }
+
+  // In-process ISR cache: pathname -> { html, renderedAt(ms) }. Prerendered HTML
+  // seeds it lazily on first hit. When a route has a `revalidate` window we serve
+  // the cached HTML immediately and, if it is older than the window, kick off a
+  // background re-render (stale-while-revalidate).
+  // ponytail: single-process in-memory cache — no shared store, lost on restart,
+  // not coordinated across replicas. Upgrade: back it with Redis/KV keyed by
+  // pathname + a per-render lock so only one replica revalidates at a time.
+  const isrCache = new Map<string, { html: string; renderedAt: number }>();
+  const revalidating = new Set<string>();
 
   // Cache imported modules across requests (the files never change at runtime).
   const moduleCache = new Map<string, RouteModule>();
@@ -80,6 +94,21 @@ export async function createProdServer(opts: ProdServerOptions) {
       moduleCache.set(serverFile, mod);
     }
     return mod;
+  }
+
+  // Render a route to a full HTML string (used by the ISR cache, which stores
+  // strings so it can serve stale copies without re-rendering).
+  async function renderRouteHtml(pattern: string, file: string, url: URL): Promise<string> {
+    const serverFile = serverFileByPattern.get(pattern);
+    if (!serverFile) throw new Error("no compiled module for route: " + pattern);
+    const mod = await loadModule(serverFile);
+    const ctx = { params: {}, url, auth: null };
+    const data = await runLoader(mod, ctx);
+    const layoutMods = await Promise.all(
+      (layoutsByPattern.get(pattern) ?? []).map((lf) => loadModule(lf)),
+    );
+    const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+    return renderPage(mod, data, manifest.clientEntry, file, layoutMods, layoutData);
   }
 
   const sink = createSink({ file: join(opts.appRoot, ".podkit/telemetry/events.jsonl") });
@@ -140,6 +169,41 @@ export async function createProdServer(opts: ProdServerOptions) {
         status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
         return;
       }
+
+      // Prerender / ISR — only for prerendered (param-less) routes on GET/HEAD.
+      const prerenderFile = prerenderByPattern.get(m.route.pattern);
+      if (prerenderFile) {
+        const revalidate = revalidateByPattern.get(m.route.pattern);
+        const key = url.pathname;
+        const now = Date.now();
+        let entry = isrCache.get(key);
+        if (!entry) {
+          // Seed from the on-disk prerendered HTML (rendered at build time).
+          const html = readFileSync(join(opts.buildDir, prerenderFile), "utf8");
+          entry = { html, renderedAt: now };
+          isrCache.set(key, entry);
+        }
+        // ISR: serve stale, re-render in the background past the window.
+        if (
+          typeof revalidate === "number" &&
+          now - entry.renderedAt > revalidate * 1000 &&
+          !revalidating.has(key)
+        ) {
+          revalidating.add(key);
+          void renderRouteHtml(m.route.pattern, m.route.file, url)
+            .then((html) => isrCache.set(key, { html, renderedAt: Date.now() }))
+            .catch(() => {
+              /* keep serving the stale copy on re-render failure */
+            })
+            .finally(() => revalidating.delete(key));
+        }
+        status = 200;
+        res.statusCode = 200;
+        res.setHeader("content-type", "text/html");
+        res.end(entry.html);
+        return;
+      }
+
       const ctx = { params: m.params, url, auth };
       const data = await runLoader(mod, ctx);
       const layoutMods = await Promise.all(

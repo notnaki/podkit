@@ -1,7 +1,7 @@
 export { buildRouteTable } from "./routing/discover.ts";
 export { matchRoute } from "./routing/match.ts";
 export { runLoader, runAction } from "./loader/run.ts";
-export { renderPage } from "./render/ssr.ts";
+export { renderPage, renderPageToStream } from "./render/ssr.ts";
 export { createDevServer } from "./server/dev-server.ts";
 export { createProdServer } from "./server/prod-server.ts";
 export { buildApp } from "./build/app.ts";
