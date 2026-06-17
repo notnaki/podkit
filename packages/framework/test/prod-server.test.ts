@@ -19,7 +19,7 @@ let clientEntry: string;
 
 beforeAll(async () => {
   const result = await buildApp(appRoot, buildDir);
-  expect(result.routeCount).toBe(7);
+  expect(result.routeCount).toBe(9);
   expect(result.clientEntry).toMatch(/^\/client\/entry-[A-Za-z0-9_-]+\.js$/);
   clientEntry = result.clientEntry;
   server = await createProdServer({ appRoot, buildDir, port: 0 });
@@ -115,6 +115,13 @@ describe("prod server", () => {
       /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
     );
   });
+
+  it("runs each layout's own loader and embeds layout data for hydration", async () => {
+    const res = await fetch(`${base}/blog/hello`);
+    const body = await res.text();
+    expect(body).toContain("<h2>Blog</h2>");
+    expect(body).toContain('window.__PODKIT_LAYOUT_DATA__ = [{},{"section":"Blog"}]');
+  });
 });
 
 describe("prod build output", () => {
@@ -122,10 +129,59 @@ describe("prod build output", () => {
     const manifest = JSON.parse(
       readFileSync(join(buildDir, "build-manifest.json"), "utf8"),
     ) as { routes: { serverFile: string }[] };
-    expect(manifest.routes).toHaveLength(7);
+    expect(manifest.routes).toHaveLength(9);
     for (const route of manifest.routes) {
       const mod = readFileSync(join(buildDir, "server", route.serverFile), "utf8");
       expect(mod.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("prerender + ISR", () => {
+  type ManifestRoute = { pattern: string; prerender?: string; revalidate?: number };
+  function manifestRoutes(): ManifestRoute[] {
+    return (
+      JSON.parse(readFileSync(join(buildDir, "build-manifest.json"), "utf8")) as {
+        routes: ManifestRoute[];
+      }
+    ).routes;
+  }
+
+  it("prerenders param-less prerender=true routes to static HTML at build", () => {
+    const route = manifestRoutes().find((r) => r.pattern === "/static-page")!;
+    expect(route.prerender).toBe("prerendered/static-page.html");
+    const html = readFileSync(join(buildDir, route.prerender!), "utf8");
+    expect(html).toContain("<h1>Static Page</h1>");
+    expect(html).toContain('<div id="root">');
+  });
+
+  it("serves the prerendered HTML directly", async () => {
+    const res = await fetch(`${base}/static-page`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<h1>Static Page</h1>");
+  });
+
+  it("records the revalidate window in the manifest", () => {
+    const route = manifestRoutes().find((r) => r.pattern === "/isr-page")!;
+    expect(route.revalidate).toBe(0);
+    expect(route.prerender).toBe("prerendered/isr-page.html");
+  });
+
+  it("serves cached HTML and re-renders in the background (stale-while-revalidate)", async () => {
+    // hits is embedded in the data script; read it from there (the rendered
+    // text node carries a React comment marker: "isr hits: <!-- -->N").
+    const hitsOf = (html: string) =>
+      Number(JSON.parse(html.match(/__PODKIT_DATA__ = (\{.*?\});/)![1]).hits);
+    // First hit: served from the build-time prerendered HTML (hits: 1 at build).
+    const first = await (await fetch(`${base}/isr-page`)).text();
+    expect(hitsOf(first)).toBe(1);
+    // revalidate=0 => the first request also triggers a background re-render.
+    // Poll until the cache reflects a newer render (hits incremented).
+    let latest = first;
+    for (let i = 0; i < 20 && hitsOf(latest) === 1; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      latest = await (await fetch(`${base}/isr-page`)).text();
+    }
+    expect(hitsOf(latest)).toBeGreaterThanOrEqual(2);
   });
 });

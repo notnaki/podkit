@@ -57,6 +57,14 @@ describe("dev server", () => {
       /data-layout="root">.*data-layout="blog">.*post: hello.*<\/section>.*<\/div>/s,
     );
   });
+
+  it("runs each layout's own loader and embeds layout data for hydration", async () => {
+    const post = await (await fetch(`${base}/blog/hello`)).text();
+    // Blog layout's loader returns { section: "Blog" }, rendered in its <h2>.
+    expect(post).toContain("<h2>Blog</h2>");
+    // Layout data is embedded as a parallel array (root has no loader -> {}).
+    expect(post).toContain('window.__PODKIT_LAYOUT_DATA__ = [{},{"section":"Blog"}]');
+  });
 });
 
 describe("dev server — actions", () => {

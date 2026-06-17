@@ -17,6 +17,18 @@ export interface BuildManifestRoute {
   serverFile: string;
   /** SSR-compiled `_layout` modules wrapping this route, outermost first. */
   layouts?: string[];
+  /**
+   * Prerendered static HTML file (relative to the build dir) for routes that
+   * `export const prerender = true` and have no dynamic params. The prod server
+   * serves this directly instead of rendering per request.
+   */
+  prerender?: string;
+  /**
+   * Optional ISR window in seconds (route `export const revalidate = <n>`).
+   * When set, the prod server serves the (cached) HTML and re-renders in the
+   * background once it is older than this many seconds.
+   */
+  revalidate?: number;
 }
 
 /**

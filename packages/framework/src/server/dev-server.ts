@@ -10,7 +10,7 @@ import { createSink } from "@podkit/telemetry";
 import { buildRouteTable, findLayouts } from "../routing/discover.ts";
 import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
-import { renderPage } from "../render/ssr.ts";
+import { renderPageToStream } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
 import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
@@ -94,17 +94,18 @@ export async function createDevServer(opts: DevServerOptions) {
           status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
           return;
         }
-        const data = await runLoader(mod, { params: m.params, url, auth });
+        const ctx = { params: m.params, url, auth };
+        const data = await runLoader(mod, ctx);
         const layoutMods = (await Promise.all(
           findLayouts(allFiles, m.route.file).map(
             (lf) => vite.ssrLoadModule(join(routesDir, lf)) as Promise<RouteModule>,
           ),
         ));
-        const html = await renderPage(mod, data, clientEntry, m.route.file, layoutMods);
+        // Each layout runs its own loader with the same ctx as the page.
+        const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
+        // Stream the HTML response (head -> React shell -> tail).
         status = 200;
-        res.statusCode = 200;
-        res.setHeader("content-type", "text/html");
-        res.end(html);
+        renderPageToStream(res, mod, data, clientEntry, m.route.file, layoutMods, layoutData);
       } catch (err) {
         status = 500;
         res.statusCode = 500;

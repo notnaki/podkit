@@ -19,14 +19,15 @@ export const CLIENT_ENTRY_SOURCE = `import { createElement } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { routes, layoutComponents } from "${VIRTUAL_ROUTES}";
 
-const w = window as unknown as { __PODKIT_ROUTE__?: string; __PODKIT_DATA__?: unknown };
+const w = window as unknown as { __PODKIT_ROUTE__?: string; __PODKIT_DATA__?: unknown; __PODKIT_LAYOUT_DATA__?: unknown[] };
 const entry = w.__PODKIT_ROUTE__ ? routes[w.__PODKIT_ROUTE__] : undefined;
 const root = document.getElementById("root");
 if (entry && root) {
   const data = w.__PODKIT_DATA__;
+  const layoutData = w.__PODKIT_LAYOUT_DATA__ ?? [];
   let tree = createElement(entry.component, { data });
   for (let i = entry.layouts.length - 1; i >= 0; i--) {
-    tree = createElement(layoutComponents[entry.layouts[i]], { data, children: tree });
+    tree = createElement(layoutComponents[entry.layouts[i]], { data: layoutData[i], children: tree });
   }
   hydrateRoot(root, tree);
 }
