@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Link } from "../src/client/link.tsx";
+import { Link } from "../src/client/link.ts";
 
 describe("Link — markup", () => {
   it("renders a plain <a href> with passthrough props (works without JS)", () => {
