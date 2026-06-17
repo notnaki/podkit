@@ -9,7 +9,13 @@ afterAll(async () => {
 });
 
 await client.raw(
-  "CREATE TABLE users (id uuid PRIMARY KEY, email text UNIQUE NOT NULL, password_hash text, created_at timestamptz)"
+  "CREATE TABLE users (id uuid PRIMARY KEY, email text UNIQUE NOT NULL, password_hash text, email_verified boolean NOT NULL DEFAULT false, created_at timestamptz)"
+);
+
+// signup() now issues an email-verification token on success, so the table must
+// exist for the in-memory db.
+await client.raw(
+  "CREATE TABLE email_verify_tokens (id uuid PRIMARY KEY, user_id uuid NOT NULL, token_hash text NOT NULL UNIQUE, expires_at timestamptz NOT NULL, used_at timestamptz, created_at timestamptz)"
 );
 
 const auth = createAuth({ db: client.db, secret: "test-secret" });
