@@ -1,0 +1,4 @@
+node_modules/
+.podkit/
+dist/
+.env

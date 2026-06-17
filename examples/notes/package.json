@@ -1,0 +1,22 @@
+{
+  "name": "notes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "podkit dev",
+    "build": "podkit build",
+    "start": "podkit start"
+  },
+  "dependencies": {
+    "@podkit/framework": "workspace:*",
+    "@podkit/db": "workspace:*",
+    "@podkit/auth": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@podkit/cli": "workspace:*",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  }
+}

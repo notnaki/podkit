@@ -74,6 +74,34 @@ importers:
         specifier: ^19.0.0
         version: 19.2.3(@types/react@19.2.17)
 
+  examples/notes:
+    dependencies:
+      '@podkit/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@podkit/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@podkit/framework':
+        specifier: workspace:*
+        version: link:../../packages/framework
+      react:
+        specifier: ^19.0.0
+        version: 19.2.7
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.7(react@19.2.7)
+    devDependencies:
+      '@podkit/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.17)
+
   packages/auth:
     dependencies:
       '@podkit/db':
