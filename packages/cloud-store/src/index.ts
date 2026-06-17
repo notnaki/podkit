@@ -10,4 +10,5 @@ export {
   passwordResetTokens,
   emailVerifyTokens,
   cliSessions,
+  blobs,
 } from "./schema.ts";

@@ -185,6 +185,22 @@ export type Store = {
   } | null>;
   deleteBranch: (projectId: string, name: string) => Promise<void>;
   getBranchConnectionString: (branchId: string) => Promise<string | null>;
+  // ponytail: bytea blob storage; upgrade to S3/object store for large assets.
+  putBlob: (opts: {
+    projectId: string;
+    key: string;
+    contentType: string;
+    data: Buffer;
+    size: number;
+  }) => Promise<void>;
+  getBlob: (
+    projectId: string,
+    key: string,
+  ) => Promise<{ contentType: string; data: Buffer; size: number } | null>;
+  listBlobs: (
+    projectId: string,
+  ) => Promise<Array<{ key: string; contentType: string; size: number; createdAt: string }>>;
+  deleteBlob: (projectId: string, key: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -362,6 +378,21 @@ export function createStore(opts: CreateStoreOptions): Store {
         throw err;
       }
     }
+    // Blob/file storage: per-project binary assets, stored as bytea at rest.
+    // UNIQUE(project_id, key) makes putBlob (upsert) race-safe.
+    // ponytail: bytea in Postgres; upgrade to S3 if large files matter.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS blobs (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL,
+        key text NOT NULL,
+        content_type text NOT NULL,
+        data bytea NOT NULL,
+        size integer NOT NULL,
+        created_at timestamp DEFAULT now(),
+        UNIQUE(project_id, key)
+      )
+    `);
   }
 
   async function createProject(input: {
@@ -900,6 +931,8 @@ export function createStore(opts: CreateStoreOptions): Store {
     await pool.query(`DELETE FROM project_branches WHERE project_id = $1`, [
       projectId,
     ]);
+    // Blobs are scoped to the project; remove them before the project row.
+    await pool.query(`DELETE FROM blobs WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
   }
 
@@ -997,6 +1030,75 @@ export function createStore(opts: CreateStoreOptions): Store {
     );
   }
 
+  async function putBlob(opts: {
+    projectId: string;
+    key: string;
+    contentType: string;
+    data: Buffer;
+    size: number;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO blobs (project_id, key, content_type, data, size)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (project_id, key)
+       DO UPDATE SET content_type = EXCLUDED.content_type,
+                     data = EXCLUDED.data,
+                     size = EXCLUDED.size,
+                     created_at = now()`,
+      [opts.projectId, opts.key, opts.contentType, opts.data, opts.size],
+    );
+  }
+
+  async function getBlob(
+    projectId: string,
+    key: string,
+  ): Promise<{ contentType: string; data: Buffer; size: number } | null> {
+    const result = await pool.query<{
+      content_type: string;
+      data: Buffer;
+      size: number;
+    }>(
+      `SELECT content_type, data, size FROM blobs
+       WHERE project_id = $1 AND key = $2 LIMIT 1`,
+      [projectId, key],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      contentType: row.content_type,
+      data: Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data),
+      size: row.size,
+    };
+  }
+
+  async function listBlobs(
+    projectId: string,
+  ): Promise<Array<{ key: string; contentType: string; size: number; createdAt: string }>> {
+    const result = await pool.query<{
+      key: string;
+      content_type: string;
+      size: number;
+      created_at: Date | null;
+    }>(
+      `SELECT key, content_type, size, created_at FROM blobs
+       WHERE project_id = $1 ORDER BY key ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({
+      key: r.key,
+      contentType: r.content_type,
+      size: r.size,
+      createdAt: r.created_at ? r.created_at.toISOString() : "",
+    }));
+  }
+
+  async function deleteBlob(projectId: string, key: string): Promise<void> {
+    await pool.query(
+      `DELETE FROM blobs WHERE project_id = $1 AND key = $2`,
+      [projectId, key],
+    );
+  }
+
   async function getBranchConnectionString(
     branchId: string,
   ): Promise<string | null> {
@@ -1057,6 +1159,10 @@ export function createStore(opts: CreateStoreOptions): Store {
     getBranchByName,
     deleteBranch,
     getBranchConnectionString,
+    putBlob,
+    getBlob,
+    listBlobs,
+    deleteBlob,
     close,
   };
 }

@@ -81,3 +81,23 @@ export const cliSessions = pgTable("cli_auth_sessions", {
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// ponytail: bytea storage in Postgres; fine for small assets (< a few MB per blob).
+// Upgrade to S3-compatible object store (presigned URLs) if large files or high
+// throughput matter; the store interface stays the same, only the backing changes.
+// NOTE: the `data` column is declared as text() here (drizzle has no bytea type);
+// the actual DDL in migrate() creates it as bytea. This definition is for
+// documentation only — store methods use raw parameterized SQL for the data column.
+export const blobs = pgTable(
+  "blobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").notNull(),
+    key: text("key").notNull(),
+    contentType: text("content_type").notNull(),
+    data: text("data").notNull(),
+    size: integer("size").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => [unique().on(t.projectId, t.key)],
+);
