@@ -43,6 +43,18 @@ function ssrSlug(file: string): string {
   return file.replace(/\.(tsx|jsx)$/, "").replace(/[\[\]]/g, "_").replace(/\.\.\./g, "___");
 }
 
+/**
+ * Fill a route pattern's `:param` segments with concrete values to get a request
+ * pathname. `/blog/:slug` + `{ slug: "a" }` -> `/blog/a`. Values are
+ * URL-encoded so the result matches what the prod server sees on the wire.
+ */
+function fillPattern(pattern: string, params: Record<string, string>): string {
+  return pattern
+    .split("/")
+    .map((seg) => (seg.startsWith(":") ? encodeURIComponent(params[seg.slice(1)]) : seg))
+    .join("/");
+}
+
 export interface BuildAppOptions {
   /** Skip building (used in tests to assert pure planning). Currently unused. */
   skip?: boolean;
@@ -175,23 +187,23 @@ export async function buildApp(
   }));
 
   // (6) Static prerender + ISR window discovery. For routes that
-  // `export const prerender = true` AND have no dynamic params, render to static
-  // HTML at build time so the prod server can serve it directly. A route may
-  // also `export const revalidate = <seconds>` to opt into ISR (recorded for
-  // the prod server's in-process stale-while-revalidate cache).
-  // ponytail: only param-less routes are prerendered (dynamic routes would need
-  // a getStaticPaths-style enumeration). Upgrade: add a params provider export
-  // and loop it here. ISR cache lives in the prod server process (see there).
+  // `export const prerender = true`, render to static HTML at build time so the
+  // prod server can serve it directly. Param-less routes render once. DYNAMIC
+  // routes additionally `export function getStaticPaths()` to enumerate the
+  // concrete param combos to render (one HTML file each). A route may also
+  // `export const revalidate = <seconds>` to opt into ISR (recorded for the prod
+  // server's in-process stale-while-revalidate cache).
+  // ponytail: getStaticPaths is rendered eagerly at build (no fallback:blocking
+  // / on-demand ISG — unlisted params just SSR at request time, see prod-server).
+  // Upgrade: persist on-demand renders to the ISR cache keyed by pathname.
   const prerenderDir = join(outDir, "prerendered");
-  for (const route of routes) {
-    const mod = (await import(
-      pathToFileURL(join(serverOutDir, route.serverFile)).href
-    )) as RouteModule;
-    if (typeof mod.revalidate === "number") route.revalidate = mod.revalidate;
-    if (mod.prerender !== true || route.params.length > 0) continue;
 
-    const url = new URL("http://localhost" + route.pattern);
-    const ctx = { params: {}, url, auth: null };
+  // Render one (mod, ctx) -> full HTML string, wrapping in the route's layouts.
+  async function renderConcrete(
+    mod: RouteModule,
+    route: BuildManifestRoute,
+    ctx: { params: Record<string, string>; url: URL; auth: null },
+  ): Promise<string> {
     const data = await runLoader(mod, ctx);
     const layoutMods = await Promise.all(
       (route.layouts ?? []).map(
@@ -200,12 +212,48 @@ export async function buildApp(
       ),
     );
     const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
-    const html = await renderPage(mod, data, clientEntry, route.file, layoutMods, layoutData);
+    return renderPage(mod, data, clientEntry, route.file, layoutMods, layoutData);
+  }
 
-    const htmlName = ssrSlug(route.file) + ".html";
+  for (const route of routes) {
+    const mod = (await import(
+      pathToFileURL(join(serverOutDir, route.serverFile)).href
+    )) as RouteModule;
+    if (typeof mod.revalidate === "number") route.revalidate = mod.revalidate;
+    if (mod.prerender !== true) continue;
+
+    if (route.params.length === 0) {
+      // Param-less route: render once.
+      const url = new URL("http://localhost" + route.pattern);
+      const ctx = { params: {}, url, auth: null };
+      const html = await renderConcrete(mod, route, ctx);
+      const htmlName = ssrSlug(route.file) + ".html";
+      mkdirSync(prerenderDir, { recursive: true });
+      writeFileSync(join(prerenderDir, htmlName), html);
+      route.prerender = "prerendered/" + htmlName;
+      continue;
+    }
+
+    // Dynamic route: needs getStaticPaths to know which combos to render.
+    if (typeof mod.getStaticPaths !== "function") continue;
+    const combos = await mod.getStaticPaths();
+    if (!Array.isArray(combos) || combos.length === 0) continue;
+
     mkdirSync(prerenderDir, { recursive: true });
-    writeFileSync(join(prerenderDir, htmlName), html);
-    route.prerender = "prerendered/" + htmlName;
+    const prerenderPaths: Record<string, string> = {};
+    let i = 0;
+    for (const params of combos) {
+      const pathname = fillPattern(route.pattern, params);
+      const url = new URL("http://localhost" + pathname);
+      const ctx = { params, url, auth: null };
+      const html = await renderConcrete(mod, route, ctx);
+      // Flatten any path separators so the file lands directly in prerenderDir
+      // (e.g. products/[id].tsx -> products_id_-0.html), no subdirs to mkdir.
+      const htmlName = `${ssrSlug(route.file).replace(/\//g, "_")}-${i++}.html`;
+      writeFileSync(join(prerenderDir, htmlName), html);
+      prerenderPaths[pathname] = "prerendered/" + htmlName;
+    }
+    route.prerenderPaths = prerenderPaths;
   }
 
   const manifest: BuildManifest = {

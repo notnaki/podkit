@@ -64,11 +64,16 @@ export async function createProdServer(opts: ProdServerOptions) {
   const serverFileByPattern = new Map<string, string>();
   const layoutsByPattern = new Map<string, string[]>();
   const prerenderByPattern = new Map<string, string>();
+  // Concrete dynamic prerenders: request pathname -> prerendered HTML file.
+  const prerenderByPath = new Map<string, string>();
   const revalidateByPattern = new Map<string, number>();
   for (const r of manifest.routes) {
     serverFileByPattern.set(r.pattern, r.serverFile);
     layoutsByPattern.set(r.pattern, r.layouts ?? []);
     if (r.prerender) prerenderByPattern.set(r.pattern, r.prerender);
+    for (const [pathname, file] of Object.entries(r.prerenderPaths ?? {})) {
+      prerenderByPath.set(pathname, file);
+    }
     if (typeof r.revalidate === "number") revalidateByPattern.set(r.pattern, r.revalidate);
   }
 
@@ -98,11 +103,16 @@ export async function createProdServer(opts: ProdServerOptions) {
 
   // Render a route to a full HTML string (used by the ISR cache, which stores
   // strings so it can serve stale copies without re-rendering).
-  async function renderRouteHtml(pattern: string, file: string, url: URL): Promise<string> {
+  async function renderRouteHtml(
+    pattern: string,
+    file: string,
+    url: URL,
+    params: Record<string, string> = {},
+  ): Promise<string> {
     const serverFile = serverFileByPattern.get(pattern);
     if (!serverFile) throw new Error("no compiled module for route: " + pattern);
     const mod = await loadModule(serverFile);
-    const ctx = { params: {}, url, auth: null };
+    const ctx = { params, url, auth: null };
     const data = await runLoader(mod, ctx);
     const layoutMods = await Promise.all(
       (layoutsByPattern.get(pattern) ?? []).map((lf) => loadModule(lf)),
@@ -187,8 +197,12 @@ export async function createProdServer(opts: ProdServerOptions) {
         return;
       }
 
-      // Prerender / ISR — only for prerendered (param-less) routes on GET/HEAD.
-      const prerenderFile = prerenderByPattern.get(m.route.pattern);
+      // Prerender / ISR on GET/HEAD. A prerendered file is found either by the
+      // route pattern (param-less routes) or by the concrete request pathname
+      // (dynamic routes enumerated via getStaticPaths). Params not in the
+      // getStaticPaths set have no entry here and fall through to SSR below.
+      const prerenderFile =
+        prerenderByPattern.get(m.route.pattern) ?? prerenderByPath.get(url.pathname);
       if (prerenderFile) {
         const revalidate = revalidateByPattern.get(m.route.pattern);
         const key = url.pathname;
@@ -207,7 +221,7 @@ export async function createProdServer(opts: ProdServerOptions) {
           !revalidating.has(key)
         ) {
           revalidating.add(key);
-          void renderRouteHtml(m.route.pattern, m.route.file, url)
+          void renderRouteHtml(m.route.pattern, m.route.file, url, m.params)
             .then((html) => isrCache.set(key, { html, renderedAt: Date.now() }))
             .catch(() => {
               /* keep serving the stale copy on re-render failure */

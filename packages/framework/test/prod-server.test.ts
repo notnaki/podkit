@@ -19,7 +19,7 @@ let clientEntry: string;
 
 beforeAll(async () => {
   const result = await buildApp(appRoot, buildDir);
-  expect(result.routeCount).toBe(9);
+  expect(result.routeCount).toBe(11);
   expect(result.clientEntry).toMatch(/^\/client\/entry-[A-Za-z0-9_-]+\.js$/);
   clientEntry = result.clientEntry;
   server = await createProdServer({ appRoot, buildDir, port: 0 });
@@ -139,7 +139,7 @@ describe("prod build output", () => {
     const manifest = JSON.parse(
       readFileSync(join(buildDir, "build-manifest.json"), "utf8"),
     ) as { routes: { serverFile: string }[] };
-    expect(manifest.routes).toHaveLength(9);
+    expect(manifest.routes).toHaveLength(11);
     for (const route of manifest.routes) {
       const mod = readFileSync(join(buildDir, "server", route.serverFile), "utf8");
       expect(mod.length).toBeGreaterThan(0);
@@ -148,7 +148,12 @@ describe("prod build output", () => {
 });
 
 describe("prerender + ISR", () => {
-  type ManifestRoute = { pattern: string; prerender?: string; revalidate?: number };
+  type ManifestRoute = {
+    pattern: string;
+    prerender?: string;
+    revalidate?: number;
+    prerenderPaths?: Record<string, string>;
+  };
   function manifestRoutes(): ManifestRoute[] {
     return (
       JSON.parse(readFileSync(join(buildDir, "build-manifest.json"), "utf8")) as {
@@ -193,5 +198,53 @@ describe("prerender + ISR", () => {
       latest = await (await fetch(`${base}/isr-page`)).text();
     }
     expect(hitsOf(latest)).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("dynamic prerender via getStaticPaths", () => {
+  type ManifestRoute = {
+    pattern: string;
+    params: string[];
+    prerenderPaths?: Record<string, string>;
+  };
+  function productsRoute(): ManifestRoute {
+    return (
+      JSON.parse(readFileSync(join(buildDir, "build-manifest.json"), "utf8")) as {
+        routes: ManifestRoute[];
+      }
+    ).routes.find((r) => r.pattern === "/products/:id")!;
+  }
+
+  it("writes one prerendered HTML file per getStaticPaths combo", () => {
+    const route = productsRoute();
+    expect(route.params).toEqual(["id"]);
+    expect(route.prerenderPaths).toBeTruthy();
+    // Both concrete paths are recorded.
+    expect(Object.keys(route.prerenderPaths!).sort()).toEqual(["/products/a", "/products/b"]);
+    for (const [pathname, file] of Object.entries(route.prerenderPaths!)) {
+      const html = readFileSync(join(buildDir, file), "utf8");
+      const id = pathname.split("/").pop();
+      expect(html).toContain(`product: ${id}`);
+      expect(html).toContain('<div id="root">');
+    }
+  });
+
+  it("serves a prerendered dynamic path directly", async () => {
+    const res = await fetch(`${base}/products/a`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("product: a");
+    expect(body).toContain('window.__PODKIT_DATA__ = {"id":"a"}');
+  });
+
+  it("falls back to SSR for a param not in getStaticPaths", async () => {
+    // "/products/z" was never prerendered — the server SSRs it on demand.
+    const route = productsRoute();
+    expect(route.prerenderPaths!["/products/z"]).toBeUndefined();
+    const res = await fetch(`${base}/products/z`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("product: z");
+    expect(body).toContain('window.__PODKIT_DATA__ = {"id":"z"}');
   });
 });

@@ -8,6 +8,14 @@ export interface RouteModule {
   prerender?: boolean;
   /** `export const revalidate = <seconds>` — ISR window for the prod server. */
   revalidate?: number;
+  /**
+   * `export function getStaticPaths()` — for a dynamic+prerender route, returns
+   * the concrete param combos to render to static HTML at build time (e.g.
+   * `[{ slug: "a" }, { slug: "b" }]`). May be async.
+   */
+  getStaticPaths?: () =>
+    | Array<Record<string, string>>
+    | Promise<Array<Record<string, string>>>;
 }
 
 export async function runLoader(mod: RouteModule, ctx: LoaderContext): Promise<unknown> {

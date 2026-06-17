@@ -41,13 +41,23 @@ export async function renderPage(
 /**
  * Stream the page HTML to a Node ServerResponse. Writes the document head,
  * pipes the React shell (renderToPipeableStream), then writes the tail (root
- * close + hydration data + module script) once the shell is done.
+ * close + hydration data + module script) once ALL Suspense content has flushed.
  *
- * ponytail: basic renderToPipeableStream with onShellReady — no Suspense
- * boundary tuning, no selective hydration, no onAllReady backpressure handling
- * beyond what pipe() gives us. Upgrade: stream with Suspense + emit the tail
- * from onAllReady (or use onShellError -> 500) if/when routes adopt streaming
- * data; switch to a Web ReadableStream for edge runtimes.
+ * Suspense correctness: we start streaming at `onShellReady`, so the shell (with
+ * any <Suspense> fallbacks) flushes immediately and React appends the resolved
+ * boundary HTML + its inline swap scripts as each promise settles. The tail
+ * carries the hydration data, so it MUST land after every boundary. React's
+ * pipe() would `end()` its destination as soon as it is done, leaving no hook to
+ * append the tail — so we pipe React into a PassThrough we own and write the
+ * tail on the bridge's `end` (fired only after React has flushed the shell AND
+ * every resolved Suspense boundary), guaranteeing the data tail comes last.
+ *
+ * ponytail: ceiling is whole-document streaming with the data tail emitted last
+ * — no selective hydration tuning, no per-boundary `bootstrapScripts`, no
+ * `onError` -> degraded shell, and bridge→res chunk forwarding is a plain `data`
+ * listener (res is duck-typed in tests, so no pipe() backpressure on that leg;
+ * React→bridge backpressure is preserved). Upgrade: switch to a Web
+ * ReadableStream + `bootstrapScriptContent` for edge runtimes.
  */
 export function renderPageToStream(
   res: ServerResponse,
@@ -66,9 +76,9 @@ export function renderPageToStream(
     return;
   }
   const tail = documentTail(data, clientEntry, routeId, layoutData);
-  // React's pipe() ends its destination when the shell completes, leaving no
-  // hook to append our tail. Pipe into a PassThrough we own: forward its chunks
-  // to res, and on its `end` write the tail + end res ourselves.
+  // Bridge React's output to res while keeping res open for our tail: forward
+  // each chunk to res and, on the bridge's `end` (after React flushed the shell
+  // AND every resolved Suspense boundary), write the tail + end res ourselves.
   const bridge = new PassThrough();
   bridge.on("data", (chunk) => res.write(chunk));
   bridge.on("end", () => {

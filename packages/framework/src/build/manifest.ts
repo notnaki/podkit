@@ -24,6 +24,14 @@ export interface BuildManifestRoute {
    */
   prerender?: string;
   /**
+   * Concrete prerendered paths for a DYNAMIC route that `export const prerender
+   * = true` and `export function getStaticPaths()`. Maps each resolved request
+   * pathname (e.g. "/blog/a") to its prerendered HTML file (relative to the
+   * build dir). The prod server serves a match directly and falls back to SSR
+   * for params not in this map.
+   */
+  prerenderPaths?: Record<string, string>;
+  /**
    * Optional ISR window in seconds (route `export const revalidate = <n>`).
    * When set, the prod server serves the (cached) HTML and re-renders in the
    * background once it is older than this many seconds.
