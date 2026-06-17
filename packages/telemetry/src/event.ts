@@ -5,7 +5,7 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface TelemetryEvent {
   ts: number;
-  kind: "log" | "event";
+  kind: "log" | "event" | "span";
   level?: LogLevel;
   message?: string;
   name?: string;
@@ -14,6 +14,12 @@ export interface TelemetryEvent {
   requestId?: string;
   deployVersion?: string;
   identity?: string;
+  // Tracing fields (populated only when kind === "span"). See trace.ts.
+  traceId?: string;
+  spanId?: string;
+  parentId?: string;
+  startTime?: number;
+  durationMs?: number;
 }
 
 export interface Sink {
@@ -47,7 +53,7 @@ export function createSink(opts: { file: string }): Sink {
 }
 
 export interface EventFilter {
-  kind?: "log" | "event";
+  kind?: "log" | "event" | "span";
   level?: LogLevel;
   route?: string;
   name?: string;
