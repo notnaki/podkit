@@ -15,6 +15,16 @@ export interface GeneratePodkitDockerfileOptions {
 // @podkit/* packages + node_modules preinstalled. Standalone app builds FROM
 // this so they never rebuild the framework — they only install the app's extra
 // deps. Operators override via PODKIT_BASE_IMAGE (e.g. a registry-cached tag).
+//
+// PINNING: PODKIT_BASE_IMAGE accepts any docker image reference, INCLUDING a
+// digest pin of the form `name@sha256:<64-hex>` (e.g.
+// `registry.example.com/podkit-base@sha256:abc...`). A digest pin makes tenant
+// builds reproducible and immune to a moved/poisoned `:latest` tag, since the
+// reference is content-addressed. The value flows verbatim into the generated
+// Dockerfile FROM line, so whatever the operator pins is exactly what's used.
+// ponytail: configurable ref + a digest the operator pre-resolves and pins;
+// auto-resolving `:latest` to its current digest and verifying it at build time
+// (so even a bare-tag config becomes immutable) is the upgrade.
 export const DEFAULT_BASE_IMAGE = "podkit-base:latest";
 
 export interface GenerateStandalonePodkitDockerfileOptions {
