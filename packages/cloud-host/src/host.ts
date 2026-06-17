@@ -856,6 +856,22 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     }
   }
 
+  // A routed container vanished out of band (manual `docker stop`, crash, OOM,
+  // host reboot) while routeMap still pointed at it — that's why a stopped pod
+  // kept showing "running" and its URL 502'd. Drop the stale route so reads stop
+  // reporting it live; when cold-start is on, mark it sleeping and (if `wake`)
+  // bring a fresh container back. Previews (keys with "--") don't cold-start, so
+  // we just forget the route. Returns true when a cold-start recovery is queued.
+  function forgetDeadRoute(slug: string, wake: boolean): boolean {
+    routeMap.delete(slug);
+    activeContainer.delete(slug);
+    lastSeen.delete(slug);
+    if (slug.includes("--") || !coldStartEnabled) return false;
+    sleeping.add(slug);
+    if (wake) void wakeProject(slug);
+    return true;
+  }
+
   // Stop prod containers idle past the timeout, moving them to `sleeping` so the
   // next request cold-starts them. Previews (keys with "--") never scale to zero.
   // ponytail: prod-only scale-to-zero; previews stay up until teardown. Upgrade:
@@ -1334,6 +1350,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     onColdStart: (slug) => {
       void wakeProject(slug);
     },
+    onUpstreamError: (slug) => forgetDeadRoute(slug, true),
   });
 
   const router = createRouter();
@@ -1376,6 +1393,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           ...p,
           version: latest ? latest.version : null,
           status: latest ? latest.status : null,
+          // Live runtime state, distinct from the (immutable) deployment status:
+          // true when scale-to-zero has reaped the container and the next request
+          // will cold-start it. Always false when cold-start is off.
+          sleeping: coldStartEnabled && sleeping.has(p.slug),
           lastDeployedAt: latest ? (latest.createdAt ?? null) : null,
           url: latest ? publicUrl(p.slug) : null,
         };
@@ -2131,6 +2152,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       body: ok({
         project,
         latest,
+        sleeping: coldStartEnabled && sleeping.has(slug),
         url: latest ? publicUrl(slug) : null,
       }),
     };

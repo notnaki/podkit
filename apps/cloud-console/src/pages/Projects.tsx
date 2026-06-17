@@ -67,9 +67,9 @@ function ProjectCard({ p }: { p: Project }) {
         </div>
       </div>
       <div className="pc-foot">
-        <span className={statusClass(p.status)}>
+        <span className={p.sleeping ? "status status-none" : statusClass(p.status)}>
           <span className="dot" />
-          {p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
+          {p.sleeping ? "Sleeping" : p.status === "running" ? "Ready" : p.version ? p.status : "No deployment"}
         </span>
         {p.version && <span className="mono faint" style={{ fontSize: "var(--t-xs)" }}>{p.version}</span>}
         {deployed && <span className="faint mono" style={{ fontSize: "var(--t-xs)" }}>{deployed}</span>}

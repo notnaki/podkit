@@ -69,6 +69,9 @@ export interface Project {
   url?: string | null;
   version?: string | null;
   status?: string | null;
+  // Live runtime state: true when scale-to-zero reaped the container (cold start
+  // on next request). Distinct from `status` (the immutable deployment status).
+  sleeping?: boolean;
   lastDeployedAt?: string | null;
 }
 export interface Deployment { id?: string; version: string; hostPort?: number; status?: string }
@@ -88,7 +91,7 @@ export interface PreviewDeployResult {
   branchName: string;
   url: string;
 }
-export interface ProjectDetail { project: Project; latest: Deployment | null; url: string | null }
+export interface ProjectDetail { project: Project; latest: Deployment | null; sleeping?: boolean; url: string | null }
 export interface CreatedProject { project: Project; database?: string; connectionString?: string }
 export interface EnvVar { key: string; sensitive: boolean; value: string | null }
 export interface Domain { domain: string }

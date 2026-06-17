@@ -12,7 +12,8 @@ export function Project({ slug }: { slug: string }) {
 
   const url = detail.data?.url ?? null;
   const dep = detail.data?.latest ?? null;
-  const running = dep?.status === "running";
+  const sleeping = detail.data?.sleeping ?? false;
+  const running = dep?.status === "running" && !sleeping;
 
   return (
     <>
@@ -52,7 +53,7 @@ export function Project({ slug }: { slug: string }) {
             <section className="panel">
               <div className="panel-head">
                 <h3>Production deployment</h3>
-                <span className={running ? "status status-ready" : "status status-none"}><span className="dot" />{running ? "Ready" : dep ? dep.status : "None"}</span>
+                <span className={running ? "status status-ready" : "status status-none"}><span className="dot" />{running ? "Ready" : sleeping ? "Sleeping" : dep ? dep.status : "None"}</span>
               </div>
               <div className="panel-body">
                 {dep ? (

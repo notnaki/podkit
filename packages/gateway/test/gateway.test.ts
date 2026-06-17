@@ -127,4 +127,36 @@ describe("createGateway — cold start", () => {
     },
     30000,
   );
+
+  it(
+    "recovers a dead upstream: holds the browser when onUpstreamError opts in",
+    async () => {
+      const forgotten: string[] = [];
+      const dead2 = createServer();
+      await new Promise<void>((r) => dead2.listen(0, r));
+      const dpAddr = dead2.address();
+      const dp = typeof dpAddr === "object" && dpAddr ? dpAddr.port : 0;
+      await new Promise<void>((r, j) => dead2.close((e) => (e ? j(e) : r())));
+
+      const g = createGateway({
+        resolve: ({ path }) =>
+          path.startsWith("/_p/gone") ? { hostPort: dp, slug: "gone" } : null,
+        onUpstreamError: (slug) => {
+          forgotten.push(slug);
+          return true; // a cold start is queued -> hold the browser
+        },
+      });
+      const { url } = await g.listen(0);
+      try {
+        const res = await fetch(url + "/_p/gone/", { redirect: "manual" });
+        expect(res.status).toBe(503);
+        expect(res.headers.get("retry-after")).toBe("2");
+        expect(await res.text()).toContain("Starting up");
+        expect(forgotten).toEqual(["gone"]);
+      } finally {
+        await g.close();
+      }
+    },
+    30000,
+  );
 });
