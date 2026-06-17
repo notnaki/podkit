@@ -7,5 +7,7 @@ export {
   projectEnv,
   projectDomains,
   accounts,
+  passwordResetTokens,
+  emailVerifyTokens,
   cliSessions,
 } from "./schema.ts";

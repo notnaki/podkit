@@ -153,6 +153,9 @@ importers:
         specifier: ^8.13.0
         version: 8.21.0
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.2
+        version: 0.5.2
       '@types/pg':
         specifier: ^8.11.0
         version: 8.20.0
