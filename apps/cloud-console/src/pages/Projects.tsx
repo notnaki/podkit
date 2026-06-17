@@ -95,7 +95,6 @@ function CopyConn({ value }: { value: string }) {
 
 function CreateProject({ onDone }: { onDone: () => void }) {
   const [slug, setSlug] = useState("");
-  const [owner, setOwner] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ connectionString?: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -103,7 +102,8 @@ function CreateProject({ onDone }: { onDone: () => void }) {
 
   async function create() {
     setBusy(true); setErr(null);
-    const res = await api.createProject(slug.trim(), owner.trim() || "me");
+    // Owner is bound to the signed-in account server-side; the body value is ignored.
+    const res = await api.createProject(slug.trim(), "");
     setBusy(false);
     if (res.ok) setResult({ connectionString: res.data.connectionString });
     else setErr(`${res.error.code}: ${res.error.message}`);
@@ -135,10 +135,7 @@ function CreateProject({ onDone }: { onDone: () => void }) {
       <div className="panel-head"><h3>New project</h3></div>
       <div className="panel-body stack">
         {!hasKey && <span className="status status-building"><span className="dot" />sign in to create projects</span>}
-        <div className="grid-2">
-          <div className="field"><label>Slug</label><input className="input mono" placeholder="my-app" value={slug} onChange={(e) => setSlug(e.target.value)} /></div>
-          <div className="field"><label>Owner</label><input className="input" placeholder="me" value={owner} onChange={(e) => setOwner(e.target.value)} /></div>
-        </div>
+        <div className="field"><label>Project name</label><input className="input mono" placeholder="my-app" value={slug} onChange={(e) => setSlug(e.target.value)} /></div>
         {err && <span className="status status-error"><span className="dot" />{err}</span>}
         <div className="row">
           <button className="btn btn-invert" disabled={!hasKey || busy || !slug.trim()} onClick={create}>{busy ? "Creating…" : "Create project"}</button>

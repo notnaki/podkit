@@ -35,6 +35,13 @@ import {
 import { createGateway } from "@podkit/gateway";
 import { createMetricsRegistry } from "@podkit/telemetry";
 import {
+  listTables,
+  getRows,
+  insertRow,
+  updateRow,
+  deleteRow,
+} from "./db-tables.ts";
+import {
   provisionDatabase,
   dropDatabase,
   createBranchDatabase,
@@ -67,6 +74,12 @@ export type CreateCloudOptions = {
   // Vendored base image standalone app builds build FROM. Defaults to
   // PODKIT_BASE_IMAGE env, then the runtime's DEFAULT_BASE_IMAGE.
   baseImage?: string;
+  // Apps domain for clean per-project URLs: a project is served at the root of
+  // `<slug>.<appsDomain>` (and a preview at `<slug>--<branch>.<appsDomain>`),
+  // with no manual domain step. Defaults to PODKIT_APPS_DOMAIN env, then
+  // "localhost" (browsers resolve *.localhost to 127.0.0.1, so it works in dev).
+  // In production, point this at a domain with wildcard DNS (e.g. apps.podkit.dev).
+  appsDomain?: string;
   // Abuse caps (default from env, else permissive). maxProjectsPerAccount 0 =
   // unlimited; rateLimitPerMin <=0 disables API rate limiting.
   maxProjectsPerAccount?: number;
@@ -109,9 +122,37 @@ function mimeForExt(ext: string): string {
 }
 
 // Parse the project slug out of a public gateway path like `/_p/<slug>/...`.
-function slugFromPath(path: string): string | null {
+export function slugFromPath(path: string): string | null {
   const match = /^\/_p\/([^/?#]+)/.exec(path);
   return match ? match[1]! : null;
+}
+
+// Resolve the routeMap key for an incoming gateway request, in precedence order:
+//   1. path-based `/_p/<key>` (the always-available fallback URL)
+//   2. an exact custom-domain match (domainMap: domain -> slug)
+//   3. the wildcard apps subdomain `<key>.<appsDomain>` — every project gets a
+//      clean root URL with no manual setup (the Vercel model). `<key>` is the
+//      prod slug, or `<slug>--<branch>` for a preview; both are valid host labels.
+// Returns the key to look up in routeMap (prod slug or `slug--branch`), or null.
+export function resolveRouteKey(
+  host: string,
+  path: string,
+  domainMap: Map<string, string>,
+  appsDomain: string,
+): string | null {
+  const fromPath = slugFromPath(path);
+  if (fromPath) return fromPath;
+
+  const hostname = host.replace(/:\d+$/, "").toLowerCase();
+  const fromDomain = domainMap.get(hostname);
+  if (fromDomain) return fromDomain;
+
+  if (appsDomain && hostname.endsWith("." + appsDomain.toLowerCase())) {
+    const label = hostname.slice(0, hostname.length - (appsDomain.length + 1));
+    // Single subdomain level only — a label with a dot isn't one of our route keys.
+    if (label && !label.includes(".")) return label;
+  }
+  return null;
 }
 
 // The "active" production deployment is the most recent deploy/rollback — NOT
@@ -615,6 +656,10 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   const baseImage =
     opts.baseImage || process.env.PODKIT_BASE_IMAGE || DEFAULT_BASE_IMAGE;
 
+  // Apps domain for clean per-project URLs (see CreateCloudOptions.appsDomain).
+  const appsDomain =
+    (opts.appsDomain || process.env.PODKIT_APPS_DOMAIN || "localhost").toLowerCase();
+
   // Build the vendored base image (the full monorepo with @podkit/* + node_modules
   // preinstalled) once, if it isn't already present locally. Idempotent: a
   // `docker image inspect` hit short-circuits, so repeated control-plane restarts
@@ -864,9 +909,18 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
 
-    // Inject the project's environment variables, then layer extraEnv on top.
-    const envRows = await store.listEnv(input.projectId);
+    // Build the container env. Precedence (lowest → highest):
+    //   1. the project's managed-Postgres connection string as DATABASE_URL, so
+    //      a production deploy talks to its provisioned database by default
+    //      (previews override this below with their branch-scoped URL);
+    //   2. the project's user-set environment variables (env set);
+    //   3. extraEnv (e.g. a preview's branch-scoped DATABASE_URL).
     const env: Record<string, string> = {};
+    const projectDbUrl = await store.getProjectDbUrl(input.projectId);
+    if (projectDbUrl) {
+      env.DATABASE_URL = projectDbUrl;
+    }
+    const envRows = await store.listEnv(input.projectId);
     for (const row of envRows) {
       env[row.key] = row.value;
     }
@@ -1014,24 +1068,32 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   // Resolved once listen() binds the gateway, used to build public URLs.
   let gatewayUrl = "";
 
+  // The clean public URL for a route key (prod slug or `slug--branch`): the app
+  // is served at the root of `<key>.<appsDomain>`. Falls back to the path form
+  // (`/_p/<key>/`) only if gatewayUrl can't be parsed. The `/_p/<key>/` route
+  // stays valid regardless, so existing links never break.
+  function publicUrl(routeKey: string): string {
+    try {
+      const u = new URL(gatewayUrl);
+      const portPart = u.port ? ":" + u.port : "";
+      return `${u.protocol}//${routeKey}.${appsDomain}${portPart}/`;
+    } catch {
+      return gatewayUrl + "/_p/" + routeKey + "/";
+    }
+  }
+
   // Sealed in-process registry of per-project request metrics (counts, status
   // classes, latency only). Never persisted; resets on restart.
   const metrics = createMetricsRegistry();
 
   const gateway = createGateway({
     resolve: ({ host, path }) => {
-      // Path-based routing (/_p/<slug>) wins; otherwise fall back to the
-      // Host header for custom-domain routing.
-      let slug = slugFromPath(path);
-      if (!slug) {
-        // Strip any :port from the Host header before lookup.
-        const hostname = host.replace(/:\d+$/, "");
-        slug = domainMap.get(hostname) ?? null;
-      }
-      if (!slug) return null;
-      const target = routeMap.get(slug);
-      // Thread the resolved slug out so onRequest can attribute the request.
-      return target ? { host: target.host, hostPort: target.port, slug } : null;
+      // /_p/<key> path -> custom domain -> wildcard <key>.<appsDomain>.
+      const key = resolveRouteKey(host, path, domainMap, appsDomain);
+      if (!key) return null;
+      const target = routeMap.get(key);
+      // Thread the resolved key out so onRequest can attribute the request.
+      return target ? { host: target.host, hostPort: target.port, slug: key } : null;
     },
     onRequest: (m) => {
       // Only record for requests that resolved to a known project slug.
@@ -1080,7 +1142,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           version: latest ? latest.version : null,
           status: latest ? latest.status : null,
           lastDeployedAt: latest ? (latest.createdAt ?? null) : null,
-          url: latest ? gatewayUrl + "/_p/" + p.slug + "/" : null,
+          url: latest ? publicUrl(p.slug) : null,
         };
       }),
     );
@@ -1227,7 +1289,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: ok({
           version: result.version,
           hostPort: result.hostPort,
-          url: gatewayUrl + "/_p/" + slug + "/",
+          url: publicUrl(slug),
         }),
       };
     },
@@ -1372,7 +1434,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           version: result.version,
           hostPort: result.hostPort,
           branchName,
-          url: gatewayUrl + "/_p/" + routeKey + "/",
+          url: publicUrl(routeKey),
         }),
       };
     },
@@ -1670,7 +1732,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       body: ok({
         project,
         latest,
-        url: latest ? gatewayUrl + "/_p/" + slug + "/" : null,
+        url: latest ? publicUrl(slug) : null,
       }),
     };
   });
@@ -2074,7 +2136,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         body: ok({
           version: target.version,
           hostPort: started.hostPort,
-          url: gatewayUrl + "/_p/" + slug + "/",
+          url: publicUrl(slug),
           rolledBackTo: b.deploymentId,
         }),
       };
@@ -2329,6 +2391,161 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       }
     },
   );
+
+  // ---------------- Table editor: browse + CRUD over the scoped DB ----------------
+  //
+  // Backs the console's data editor. Every endpoint runs the same guard ladder as
+  // db/query (guardMutation -> 404 -> ownership) and connects as the project's
+  // SCOPED non-superuser role (or a branch's), never admin — so it can only ever
+  // touch this one tenant's database. Identifier safety lives in db-tables.ts.
+
+  type LoadedProject = NonNullable<Awaited<ReturnType<typeof store.getProjectBySlug>>>;
+
+  async function guardProject(
+    headers: Record<string, string | string[] | undefined>,
+    slug: string,
+  ): Promise<{ project: LoadedProject } | { resp: { status: number; body: unknown } }> {
+    if (!(await guardMutation(headers))) return { resp: unauthorized() };
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return { resp: { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) } };
+    }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return { resp: unauthorized() };
+    if (access === "forbidden") return { resp: forbidden() };
+    return { project };
+  }
+
+  function branchParam(
+    query: URLSearchParams,
+  ): { branchName: string | null } | { resp: { status: number; body: unknown } } {
+    const b = query.get("branchName");
+    if (b !== null && !isValidBranchName(b)) {
+      return {
+        resp: {
+          status: 400,
+          body: fail("E_BAD_ARGS", "invalid branch name", "branchName must match ^[a-z0-9][a-z0-9_]{0,49}$"),
+        },
+      };
+    }
+    return { branchName: b };
+  }
+
+  // Resolve the SCOPED conn string for a project or one of its branches (never admin).
+  async function resolveScopedConn(
+    project: LoadedProject,
+    branchName: string | null,
+  ): Promise<{ conn: string } | { resp: { status: number; body: unknown } }> {
+    try {
+      if (branchName !== null) {
+        const branch = await store.getBranchByName(project.id, branchName);
+        if (!branch) {
+          return { resp: { status: 404, body: fail("E_NOT_FOUND", "unknown branch: " + branchName) } };
+        }
+        const conn = await store.getBranchConnectionString(branch.id);
+        if (!conn) {
+          return { resp: { status: 400, body: fail("E_QUERY_FAILED", "could not resolve the branch database") } };
+        }
+        return { conn };
+      }
+      let conn = await store.getProjectDbUrl(project.id);
+      if (!conn) {
+        const provisioned = await provisionDatabase({
+          adminConnectionString: opts.adminConnectionString,
+          slug: project.slug,
+        });
+        conn = provisioned.connectionString;
+        await store.setProjectDbUrl(project.id, conn);
+      }
+      return { conn };
+    } catch {
+      return { resp: { status: 400, body: fail("E_QUERY_FAILED", "could not resolve the database") } };
+    }
+  }
+
+  // Connect as the scoped role, bound the statement timeout, run fn, always close.
+  // db-tables throws Errors with safe, owner-facing messages (unknown table/column,
+  // or a constraint violation on the owner's OWN database); surface them so the
+  // editor is usable — this is the project owner acting on their own data.
+  async function withScopedClient(
+    project: LoadedProject,
+    branchName: string | null,
+    fn: (client: Client) => Promise<unknown>,
+  ): Promise<{ status: number; body: unknown }> {
+    const resolved = await resolveScopedConn(project, branchName);
+    if ("resp" in resolved) return resolved.resp;
+    const client = new Client({ connectionString: resolved.conn });
+    try {
+      await client.connect();
+      await client.query("SET statement_timeout = 5000");
+      const data = await fn(client);
+      return { status: 200, body: ok(data) };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "operation failed";
+      return { status: 400, body: fail("E_DB_ERROR", message.slice(0, 300)) };
+    } finally {
+      try {
+        await client.end();
+      } catch {
+        // connection may have failed to open
+      }
+    }
+  }
+
+  router.register("GET", "/v1/projects/:slug/db/tables", async ({ headers, params, query }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({ tables: await listTables(c) }));
+  });
+
+  router.register("GET", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const limit = Number(query.get("limit") ?? "50");
+    const offset = Number(query.get("offset") ?? "0");
+    return withScopedClient(guard.project, bp.branchName, (c) =>
+      getRows(c, params.table!, {
+        limit: Number.isFinite(limit) ? limit : 50,
+        offset: Number.isFinite(offset) ? offset : 0,
+      }),
+    );
+  });
+
+  router.register("POST", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const values = ((body ?? {}) as { values?: Record<string, unknown> }).values ?? {};
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({ row: await insertRow(c, params.table!, values) }));
+  });
+
+  router.register("PATCH", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const b = (body ?? {}) as { pk?: Record<string, unknown>; values?: Record<string, unknown> };
+    return withScopedClient(guard.project, bp.branchName, async (c) => ({
+      row: await updateRow(c, params.table!, b.pk ?? {}, b.values ?? {}),
+    }));
+  });
+
+  router.register("DELETE", "/v1/projects/:slug/db/tables/:table", async ({ headers, params, query, body }) => {
+    const guard = await guardProject(headers, params.slug!);
+    if ("resp" in guard) return guard.resp;
+    const bp = branchParam(query);
+    if ("resp" in bp) return bp.resp;
+    const b = (body ?? {}) as { pk?: Record<string, unknown> };
+    return withScopedClient(guard.project, bp.branchName, async (c) => {
+      await deleteRow(c, params.table!, b.pk ?? {});
+      return { deleted: true };
+    });
+  });
 
   router.register(
     "POST",
@@ -2792,9 +3009,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         branchName: previewBranchName,
         extraEnv: previewExtraEnv,
       });
-    } catch {
+    } catch (err) {
       // Defensive: extractAndBuild already cleans up, but guard against an
       // unexpected throw so we never leak the temp dir or a stack trace.
+      // Log the real error server-side (the client only gets a generic 500) so
+      // a failed deploy is diagnosable instead of silently swallowed.
+      console.error("[podkit] deploy-upload failed for " + input.slug + ":", err);
       try {
         rmSync(extractParent, { recursive: true, force: true });
       } catch {
@@ -2820,7 +3040,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
         version: result.version,
         hostPort: result.hostPort,
         branchName: previewBranchName,
-        url: gatewayUrl + "/_p/" + routeKey + "/",
+        url: publicUrl(routeKey),
       }),
     );
   }
@@ -2950,7 +3170,11 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           return;
         }
 
-        const body = method === "POST" ? await readJson(req) : undefined;
+        // Read a JSON body for any method that carries one (POST/PUT/PATCH/DELETE);
+        // GET/HEAD never do. readJson resolves {} for an empty body, so bodyless
+        // DELETEs are unaffected. (deploy-upload is handled above and never reaches here.)
+        const body =
+          method === "GET" || method === "HEAD" ? undefined : await readJson(req);
         const m = router.match(method, url.pathname);
         if (!m) {
           sendJson(res, 404, fail("E_NOT_FOUND", "not found: " + url.pathname));

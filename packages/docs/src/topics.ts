@@ -29,8 +29,35 @@ the resolved \`auth\` identity or null); its return value is passed to the defau
 component as the \`data\` prop and rendered to HTML with React. Type the prop with
 \`PageProps<LoaderData<typeof loader>>\` so the component and loader can't drift.
 
-(There is no \`action\` export yet — loaders are read-side only. Handle writes
-from your own server logic or a future actions API.)`,
+A route may also export an \`action(ctx)\` for writes: it runs on non-GET
+requests (typically a form POST), receives parsed \`formData\` alongside
+\`params\`/\`url\`/\`auth\`, and returns an \`ActionResult\` — a redirect (answered
+as a 303 Post/Redirect/Get) optionally with \`cookies\` to set. Routes without an
+\`action\` return 405 for non-GET requests.
+
+**Layouts** — \`app/routes/_layout.tsx\` wraps every route; a \`<dir>/_layout.tsx\`
+wraps the routes under \`<dir>\`, nested inside the root layout. A layout is a
+presentational component that receives the page element as \`children\` (plus the
+route's loader \`data\`) — use it for shared chrome like nav and footers. Layouts
+are matched outermost-first and don't have their own loaders yet. Files beginning
+with \`_\` are never routes.
+
+After SSR the framework **hydrates** the page in the browser: it ships a client
+bundle (owned by the framework — apps don't write \`entry-client.tsx\`) that
+re-mounts the same route + layout components with the embedded data, so
+\`useState\`, effects, and event handlers work.
+
+There are **no \`"use client"\`/\`"use server"\` directives**. The split is
+structural — by which export a value is, not an annotation:
+- \`loader\`/\`action\` run on the server only and are stripped from the client
+  bundle (along with the \`node:\`/\`@podkit/db\` imports only they use) — put DB
+  calls, secrets, and Node built-ins here.
+- the default component (and \`_layout\` components) run on the server (SSR) and
+  the client (hydration) — write normal React there, no directive needed.
+
+The one rule: whatever your *component* imports is bundled for the browser, so
+keep server-only modules inside \`loader\`/\`action\` and pass what the component
+needs through the loader's \`data\`.`,
   },
   db: {
     topic: "db",
@@ -44,7 +71,9 @@ TypeScript and podkit derives migrations from them.
   database matches the schema declared in code. Applied migrations are tracked
   and the command is idempotent.
 - \`podkit db pull\` — introspects the live database and writes the current
-  schema back to code, useful for adopting an existing database.
+  schema back to code: a versioned SQL migration plus a regenerated drizzle
+  \`schema.ts\` (importing from \`@podkit/db\`). Useful for adopting an existing
+  database into schema-as-code.
 
 Tables are written with helpers re-exported from \`@podkit/db\` (e.g.
 \`pgTable\`, \`text\`, \`integer\`, \`uuidPk\`). podkit also ships **row-level
@@ -76,30 +105,6 @@ podkit auth recognizes two kinds of principals: **users** (human accounts) and
 An agent token is a bearer credential sent on requests; podkit verifies the
 token, resolves the principal, and feeds that identity into RLS so a token only
 ever sees the data its policies allow.`,
-  },
-  deploy: {
-    topic: "deploy",
-    title: "Deploy",
-    content: `# Deploy
-
-podkit deploys **immutable versions**: each build produces a versioned,
-content-addressed artifact that is never mutated after creation. Promotion and
-rollback just point an environment at a different existing version.
-
-- \`podkit deploy up\` — builds and uploads a new immutable version.
-- \`podkit deploy promote\` — points an environment (e.g. production) at a given
-  version, making it live.
-- \`podkit deploy rollback\` — re-promotes a previously deployed version, an
-  instant revert since the artifact still exists.
-- \`podkit deploy claim\` — claims/binds a project or domain to the deploy
-  target so subsequent deploys are authorized.
-
-Because versions are immutable, a rollback is deterministic: you always get back
-exactly the bits that were previously running.
-
-This \`podkit deploy\` family is the **local** deploy registry (versions on disk).
-To deploy to a hosted control-plane, see the \`cloud\` topic and
-\`podkit cloud deploy\`.`,
   },
   cli: {
     topic: "cli",
@@ -178,10 +183,11 @@ podkit cloud preview myapp staging           # deploy cwd against the 'staging' 
 podkit cloud preview list myapp
 \`\`\`
 
-Production serves at \`/_p/<slug>/\`; a preview gets its own route key of the form
-\`<slug>--<branch>\` and is tracked separately, so a preview never owns the
-production route and tearing one down never disturbs production. Preview deploys
-automatically receive the branch's connection string as \`DATABASE_URL\`.`,
+Production serves at \`<slug>.<apps-domain>\` (also \`/_p/<slug>/\`); a preview gets
+its own URL \`<slug>--<branch>.<apps-domain>\` and is tracked separately, so a
+preview never owns the production route and tearing one down never disturbs
+production. Preview deploys automatically receive the branch's connection string
+as \`DATABASE_URL\`.`,
   },
   env: {
     topic: "env",

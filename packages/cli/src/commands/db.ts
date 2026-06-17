@@ -43,12 +43,12 @@ export async function dbCommand(args: string[]): Promise<Envelope<unknown>> {
     if (subcommand === "pull") {
       const client = createDbClient({ dataDir });
       try {
-        const { migrationFile, tables } = await pullSchema({
+        const { migrationFile, schemaFile, tables } = await pullSchema({
           client,
           outDir: migrationsDir,
           timestamp: Date.now(),
         });
-        return ok({ migrationFile, tables });
+        return ok({ migrationFile, schemaFile, tables });
       } finally {
         await client.close();
       }

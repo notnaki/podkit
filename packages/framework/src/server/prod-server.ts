@@ -9,6 +9,7 @@ import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
 import { renderPage } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
+import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
 import { readManifest } from "../build/manifest.ts";
 import type { Route } from "../types.ts";
@@ -61,10 +62,25 @@ export async function createProdServer(opts: ProdServerOptions) {
     params: r.params,
   }));
   const serverFileByPattern = new Map<string, string>();
-  for (const r of manifest.routes) serverFileByPattern.set(r.pattern, r.serverFile);
+  const layoutsByPattern = new Map<string, string[]>();
+  for (const r of manifest.routes) {
+    serverFileByPattern.set(r.pattern, r.serverFile);
+    layoutsByPattern.set(r.pattern, r.layouts ?? []);
+  }
 
   // Cache imported modules across requests (the files never change at runtime).
   const moduleCache = new Map<string, RouteModule>();
+
+  async function loadModule(serverFile: string): Promise<RouteModule> {
+    let mod = moduleCache.get(serverFile);
+    if (!mod) {
+      const modPath = join(serverDir, serverFile);
+      // @vite-ignore — these are pre-built ESM files imported via Node's loader.
+      mod = (await import(pathToFileURL(modPath).href)) as RouteModule;
+      moduleCache.set(serverFile, mod);
+    }
+    return mod;
+  }
 
   const sink = createSink({ file: join(opts.appRoot, ".podkit/telemetry/events.jsonl") });
 
@@ -118,15 +134,17 @@ export async function createProdServer(opts: ProdServerOptions) {
       if (!serverFile) {
         throw new Error("no compiled module for route: " + m.route.pattern);
       }
-      let mod = moduleCache.get(serverFile);
-      if (!mod) {
-        const modPath = join(serverDir, serverFile);
-        // @vite-ignore — these are pre-built ESM files imported via Node's loader.
-        mod = (await import(pathToFileURL(modPath).href)) as RouteModule;
-        moduleCache.set(serverFile, mod);
+      const mod = await loadModule(serverFile);
+      const method = req.method ?? "GET";
+      if (method !== "GET" && method !== "HEAD") {
+        status = await handleAction(req, res, mod, { params: m.params, url, auth, method });
+        return;
       }
       const data = await runLoader(mod, { params: m.params, url, auth });
-      const html = await renderPage(mod, data, manifest.clientEntry);
+      const layoutMods = await Promise.all(
+        (layoutsByPattern.get(m.route.pattern) ?? []).map((lf) => loadModule(lf)),
+      );
+      const html = await renderPage(mod, data, manifest.clientEntry, m.route.file, layoutMods);
       status = 200;
       res.statusCode = 200;
       res.setHeader("content-type", "text/html");

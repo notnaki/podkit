@@ -52,8 +52,10 @@ h3 { font-size: var(--t-md); font-weight: 600; letter-spacing: -0.015em; }
 .wrap-tight { width: 100%; max-width: 1160px; margin: 0 auto; padding: 0 var(--space-xl); }
 
 /* ---- tabs (underline active) ---- */
-.tabs { display: flex; gap: var(--space-lg); border-bottom: 1px solid var(--border); padding: 0 var(--space-xl); margin-top: var(--space-xs); position: sticky; top: 60px; background: var(--bg); z-index: 10; }
-.tabs-inner { display: flex; gap: var(--space-lg); width: 100%; max-width: 1160px; margin: 0 auto; }
+.tabs { display: flex; gap: var(--space-lg); border-bottom: 1px solid var(--border); padding: 0 var(--space-xl); margin-top: var(--space-xs); position: sticky; top: 60px; background: var(--bg); z-index: 10; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs-inner { display: flex; gap: var(--space-lg); width: 100%; max-width: 1160px; margin: 0 auto; min-width: max-content; }
+.tab { flex: 0 0 auto; }
 .tab {
   padding: var(--space-sm) 2px var(--space-sm);
   color: var(--text-muted); font-size: var(--t-sm); font-weight: 500;
@@ -134,6 +136,12 @@ h3 { font-size: var(--t-md); font-weight: 600; letter-spacing: -0.015em; }
 .table th { text-align: left; font-size: var(--t-xs); color: var(--text-faint); font-weight: 500; padding: var(--space-xs) var(--space-lg); border-bottom: 1px solid var(--border); }
 .table td { padding: var(--space-sm) var(--space-lg); border-bottom: 1px solid var(--border); }
 .table tr:last-child td { border-bottom: none; }
+/* Wide tables (uuids, long values, many columns) scroll horizontally WITHIN
+   their panel instead of pushing the whole page sideways. Every table here is
+   rendered inside a flush panel-body, so this one rule covers all tabs. */
+.panel-body.flush { overflow-x: auto; }
+.table td, .table th { white-space: nowrap; }
+.table td { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- code / states ---- */
 .code { font-family: var(--font-mono); font-size: var(--t-sm); line-height: 1.6; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--space-md); overflow: auto; color: var(--text-muted); }

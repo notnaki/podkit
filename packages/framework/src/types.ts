@@ -1,3 +1,5 @@
+import type { CookieDirective } from "./request/cookie.ts";
+
 export type RouteKind = "static" | "dynamic" | "catchall";
 
 export interface Route {
@@ -11,6 +13,23 @@ export interface LoaderContext {
   params: Record<string, string>;
   url: URL;
   auth?: { userId: string; isAgent: boolean } | null;
+}
+
+// A route may export `action(ctx)` to handle non-GET requests (form POSTs).
+// It receives the same identity/params as a loader, plus the HTTP method and the
+// parsed `application/x-www-form-urlencoded` body, and returns a directive the
+// server turns into a 303 redirect (Post/Redirect/Get) with optional cookies.
+export interface ActionContext {
+  params: Record<string, string>;
+  url: URL;
+  auth?: { userId: string; isAgent: boolean } | null;
+  method: string;
+  formData: Record<string, string>;
+}
+
+export interface ActionResult {
+  redirect: string;
+  cookies?: CookieDirective[];
 }
 
 // A route's default export is server-rendered and receives its loader's return

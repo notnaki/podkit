@@ -33,7 +33,6 @@ describe("podkit init", () => {
     const appDir = join(tmp, "my-app");
     for (const f of [
       "package.json",
-      "app/entry-client.tsx",
       "app/routes/index.tsx",
       "app/routes/about.tsx",
       ".gitignore",
@@ -41,6 +40,8 @@ describe("podkit init", () => {
     ]) {
       expect(existsSync(join(appDir, f)), f).toBe(true);
     }
+    // The framework owns the client hydration entry — apps don't scaffold one.
+    expect(existsSync(join(appDir, "app/entry-client.tsx"))).toBe(false);
 
     const pkg = JSON.parse(readFileSync(join(appDir, "package.json"), "utf8"));
     expect(pkg.name).toBe("my-app");

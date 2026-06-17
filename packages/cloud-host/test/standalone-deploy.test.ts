@@ -313,7 +313,7 @@ describe("one-click standalone podkit deploy (real Docker + Postgres)", () => {
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(res.body.ok).toBe(true);
       expect(typeof res.body.data.url).toBe("string");
-      expect(String(res.body.data.url)).toContain("/_p/test-hello/");
+      expect(String(res.body.data.url)).toContain("test-hello.localhost");
 
       // The gateway serves the SSR'd standalone app. Poll briefly for proxy
       // warm-up, but it should already be live.

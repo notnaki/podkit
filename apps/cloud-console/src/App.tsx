@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api, getApiUrl, setApiUrl, getToken, clearToken } from "./api/client.ts";
+import { api, getToken, clearToken } from "./api/client.ts";
 import type { Account } from "./api/client.ts";
 import { useApi } from "./lib/useApi.ts";
 import { Projects } from "./pages/Projects.tsx";
@@ -119,7 +119,7 @@ function PublicNav({ account }: { account: Account | null }) {
     <header className="topnav topnav-public">
       <a className="brand" href="#/">
         <span className="logo" aria-hidden>
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5 16.5 15h-15L9 1.5Z" fill="currentColor" /></svg>
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><rect x="1" y="1" width="7" height="7" rx="2.2" fill="currentColor" /><rect x="10" y="1" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="1" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="10" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /></svg>
         </span>
         podkit
       </a>
@@ -160,7 +160,7 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
       <header className="topnav">
         <a className="brand" href="#/">
           <span className="logo" aria-hidden>
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 1.5 16.5 15h-15L9 1.5Z" fill="currentColor" /></svg>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><rect x="1" y="1" width="7" height="7" rx="2.2" fill="currentColor" /><rect x="10" y="1" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="1" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /><rect x="10" y="10" width="7" height="7" rx="2.2" fill="currentColor" fillOpacity="0.38" /></svg>
           </span>
           podkit
         </a>
@@ -187,7 +187,6 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
           {health.loading ? "connecting" : connected ? "control-plane" : "offline"}
         </span>
         {account && <span className="muted mono" style={{ fontSize: "var(--t-sm)" }}>{account.email}</span>}
-        <Connect onSaved={() => location.reload()} />
         <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>
       </header>
 
@@ -202,23 +201,3 @@ function Console({ route, account, onSignOut }: { route: Route; account: Account
   );
 }
 
-function Connect({ onSaved }: { onSaved: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [url, setUrl] = useState(getApiUrl());
-  return (
-    <div style={{ position: "relative" }}>
-      <button className="btn btn-sm" onClick={() => setOpen((o) => !o)}>{open ? "Close" : "Connect"}</button>
-      {open && (
-        <div className="popover panel rise">
-          <div className="panel-body" style={{ display: "grid", gap: "var(--space-sm)" }}>
-            <div className="field">
-              <label>Control-plane URL</label>
-              <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} />
-            </div>
-            <button className="btn btn-invert" onClick={() => { setApiUrl(url); onSaved(); }}>Save & reconnect</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

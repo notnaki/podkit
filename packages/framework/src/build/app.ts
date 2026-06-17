@@ -1,8 +1,9 @@
 import { build as viteBuild } from "vite";
 import react from "@vitejs/plugin-react";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
-import { buildRouteTable } from "../routing/discover.ts";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, relative, isAbsolute } from "node:path";
+import { buildRouteTable, findLayouts } from "../routing/discover.ts";
+import { podkitPlugins, CLIENT_ENTRY_SOURCE } from "./plugin.ts";
 import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
 
 function listFiles(dir: string, root = dir): string[] {
@@ -16,8 +17,17 @@ function listFiles(dir: string, root = dir): string[] {
   return out;
 }
 
-/** Dependencies that must stay external to the SSR bundle (resolved at runtime). */
-const SSR_EXTERNAL = ["react", "react-dom", "react-dom/server", "react/jsx-runtime"];
+/**
+ * Keep every bare (node_modules / node:) import external to the SSR bundle, so
+ * only the app's own source (relative/absolute imports) is bundled. This is
+ * standard SSR behavior: server dependencies — react, @podkit/*, and crucially
+ * native/CJS/wasm packages like `pg`, `pglite`, and `drizzle-orm` that a route's
+ * loader/action pulls in via `@podkit/db`/`@podkit/auth` — are resolved from
+ * node_modules at runtime instead of being bundled (bundling them would break).
+ */
+function isBareImport(id: string): boolean {
+  return !id.startsWith(".") && !id.startsWith("\0") && !isAbsolute(id);
+}
 
 /**
  * Map a source route file to a filesystem-safe SSR output slug. Rollup/Vite
@@ -46,8 +56,10 @@ export interface BuildAppResult {
  * Produce a production build of a podkit app.
  *
  * Three steps:
- *  1. Vite client build: bundles app/entry-client.tsx into hashed assets under
- *     <outDir>/client with a manifest.json (drives the hashed <script> path).
+ *  1. Vite client build: bundles the framework-owned hydration entry (which
+ *     pulls the per-app route table from virtual:podkit-routes) into hashed
+ *     assets under <outDir>/client with a manifest.json (drives the hashed
+ *     <script> path). The podkit plugin strips server-only route code here.
  *  2. Vite SSR build: pre-compiles every discovered route module into an ESM
  *     file under <outDir>/server/routes/<slug>-SSR.js, with react/react-dom
  *     kept external. The prod server dynamically imports these directly — no
@@ -61,18 +73,26 @@ export async function buildApp(
   _opts: BuildAppOptions = {},
 ): Promise<BuildAppResult> {
   const routesDir = join(appRoot, "app", "routes");
-  const table = buildRouteTable(listFiles(routesDir).map((f) => f.split("\\").join("/")));
+  const allFiles = listFiles(routesDir).map((f) => f.split("\\").join("/"));
+  const table = buildRouteTable(allFiles);
+  const layoutFiles = allFiles.filter((f) => /(^|\/)_layout\.(tsx|jsx)$/.test(f));
 
   const clientOutDir = join(outDir, "client");
   const serverOutDir = join(outDir, "server");
 
-  const clientEntrySrc = join(appRoot, "app", "entry-client.tsx");
+  // The framework owns the client entry (hydration bootstrap). Write it under
+  // the build dir and feed it to Vite as the client input; it pulls the per-app
+  // route table from the plugin's virtual:podkit-routes module.
+  mkdirSync(outDir, { recursive: true });
+  const clientEntrySrc = join(outDir, "client-entry.tsx");
+  writeFileSync(clientEntrySrc, CLIENT_ENTRY_SOURCE);
 
-  // (1) Client build — single shared hydration entry, hashed + manifest.
+  // (1) Client build — framework hydration entry, hashed + manifest. The podkit
+  // plugins serve the virtual route table and strip server-only route code.
   await viteBuild({
     root: appRoot,
     logLevel: "warn",
-    plugins: [react()],
+    plugins: [react(), ...(podkitPlugins(appRoot) as never[])],
     build: {
       outDir: clientOutDir,
       emptyOutDir: true,
@@ -95,6 +115,10 @@ export async function buildApp(
   for (const route of table) {
     routeInputs[`routes/${ssrSlug(route.file)}-SSR`] = join(routesDir, route.file);
   }
+  // Layouts are SSR-compiled too so the prod server can wrap pages with them.
+  for (const lf of layoutFiles) {
+    routeInputs[`routes/${ssrSlug(lf)}-SSR`] = join(routesDir, lf);
+  }
 
   if (Object.keys(routeInputs).length > 0) {
     await viteBuild({
@@ -108,7 +132,7 @@ export async function buildApp(
         manifest: false,
         rollupOptions: {
           input: routeInputs,
-          external: SSR_EXTERNAL,
+          external: (id: string) => isBareImport(id),
           output: {
             format: "es",
             entryFileNames: "[name].js",
@@ -144,6 +168,7 @@ export async function buildApp(
     file: route.file,
     params: route.params,
     serverFile: `routes/${ssrSlug(route.file)}-SSR.js`,
+    layouts: findLayouts(allFiles, route.file).map((lf) => `routes/${ssrSlug(lf)}-SSR.js`),
   }));
 
   const manifest: BuildManifest = {

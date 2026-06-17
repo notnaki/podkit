@@ -5,7 +5,8 @@ import { PodkitError } from "../errors.ts";
 
 // `podkit init [name]` — scaffold a new podkit app so a user goes from nothing
 // to a deployable app in one command. Files mirror the framework's conventions
-// (app/routes/*.tsx with a default component + optional loader, app/entry-client.tsx).
+// (app/routes/*.tsx with a default component + optional loader/action). The
+// client hydration entry is owned by the framework — apps don't write one.
 
 // A project name doubles as a deploy slug, so keep it slug-safe.
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,49}$/;
@@ -39,12 +40,6 @@ function tpl(name: string): Record<string, string> {
         null,
         2,
       ) + "\n",
-
-    "app/entry-client.tsx":
-      `import { hydrateRoot } from "react-dom/client";\n` +
-      `declare global { interface Window { __PODKIT_DATA__: unknown } }\n` +
-      `const root = document.getElementById("root")!;\n` +
-      `hydrateRoot(root, root.firstElementChild as never);\n`,
 
     "app/routes/index.tsx":
       `// A route module: optional loader(ctx) runs on the server, and its return\n` +

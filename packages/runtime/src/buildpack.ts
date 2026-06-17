@@ -83,6 +83,11 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY . .
 RUN pnpm install --frozen-lockfile=false
 RUN node /app/packages/cli/src/bin.ts build --appRoot /app/${opts.appSubpath} --outDir ${appBuildDir}
+# Production runtime config: real React prod build (no dev warnings/checks) and
+# the framework's Secure-cookie defaults. (Image slimming via pnpm prune --prod
+# is unsafe in this grafted pnpm workspace — it strips the @podkit/* links the
+# CLI needs at runtime — so it's deferred to a framework packaging change.)
+ENV NODE_ENV=production
 RUN chown -R node:node /app
 WORKDIR /app/${opts.appSubpath}
 EXPOSE ${port}
@@ -140,6 +145,10 @@ RUN cd /app && pnpm install --no-frozen-lockfile
 RUN node /app/packages/cli/src/bin.ts build --appRoot ${STANDALONE_APP_DIR} --outDir ${appBuildDir}
 
 FROM ${baseImage} AS runtime
+# Production runtime config: real React prod build + the framework's Secure-cookie
+# defaults. (Image slimming via pnpm prune --prod is unsafe in this grafted pnpm
+# workspace — it strips the @podkit/* links the CLI needs — so it's deferred.)
+ENV NODE_ENV=production
 COPY --from=builder /app /app
 RUN chown -R node:node /app
 WORKDIR ${STANDALONE_APP_DIR}
