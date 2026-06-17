@@ -209,6 +209,24 @@ export function deadRouteKeys(
   return dead;
 }
 
+// Build a container's env with the precedence every start path shares (lowest →
+// highest): the project's managed-Postgres URL as DATABASE_URL, then the user's
+// env vars (which may override it), then extraEnv (e.g. a preview's branch DB).
+// Every runContainer() call MUST route through this — a re-run (cold-start wake,
+// rollback) that drops DATABASE_URL leaves the app to fall back to a read-only
+// pglite mkdir (EROFS). Pure so it's unit-testable without Docker.
+export function buildContainerEnv(
+  dbUrl: string | null,
+  envRows: ReadonlyArray<{ key: string; value: string }>,
+  extraEnv?: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (dbUrl) env.DATABASE_URL = dbUrl;
+  for (const row of envRows) env[row.key] = row.value;
+  if (extraEnv) for (const [k, v] of Object.entries(extraEnv)) env[k] = v;
+  return env;
+}
+
 // Reject any SQL that is not a single, read-only SELECT. This is a deliberately
 // conservative allow/deny gate layered *in front of* the per-project scoped role
 // (which is the real isolation boundary — see provisionDatabase): even a parser
@@ -889,9 +907,12 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       if (!active || !active.containerPort) return;
       const tag = "podkit-" + slug + ":" + active.version;
       const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
-      const envRows = await store.listEnv(project.id);
-      const env: Record<string, string> = {};
-      for (const row of envRows) env[row.key] = row.value;
+      // A wake starts a FRESH container, so DATABASE_URL must be re-injected or
+      // the woken app loses its DB (EROFS via the pglite fallback).
+      const env = buildContainerEnv(
+        await store.getProjectDbUrl(project.id),
+        await store.listEnv(project.id),
+      );
       let started: { id: string; hostPort: number };
       try {
         started = await runContainer({
@@ -1246,26 +1267,27 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       };
     }
 
-    // Build the container env. Precedence (lowest → highest):
-    //   1. the project's managed-Postgres connection string as DATABASE_URL, so
-    //      a production deploy talks to its provisioned database by default
-    //      (previews override this below with their branch-scoped URL);
-    //   2. the project's user-set environment variables (env set);
-    //   3. extraEnv (e.g. a preview's branch-scoped DATABASE_URL).
-    const env: Record<string, string> = {};
-    const projectDbUrl = await store.getProjectDbUrl(input.projectId);
-    if (projectDbUrl) {
-      env.DATABASE_URL = projectDbUrl;
+    // Self-heal: a project can exist without a provisioned database (creation is
+    // not atomic — the row is inserted before provisioning, so a failed provision
+    // leaves db_url null). Provision-on-deploy here, mirroring resolveScopedConn,
+    // so an app never deploys without a DATABASE_URL and silently falls back to a
+    // read-only pglite mkdir (EROFS). Previews override this below with extraEnv.
+    let projectDbUrl = await store.getProjectDbUrl(input.projectId);
+    if (!projectDbUrl) {
+      const provisioned = await provisionDatabase({
+        adminConnectionString: opts.adminConnectionString,
+        slug: input.slug,
+      });
+      projectDbUrl = provisioned.connectionString;
+      await store.setProjectDbUrl(input.projectId, projectDbUrl);
     }
-    const envRows = await store.listEnv(input.projectId);
-    for (const row of envRows) {
-      env[row.key] = row.value;
-    }
-    if (input.extraEnv) {
-      for (const [k, v] of Object.entries(input.extraEnv)) {
-        env[k] = v;
-      }
-    }
+    // Precedence (lowest → highest): DATABASE_URL, then the project's user env
+    // vars (may override it), then extraEnv (e.g. a preview's branch-scoped DB).
+    const env = buildContainerEnv(
+      projectDbUrl,
+      await store.listEnv(input.projectId),
+      input.extraEnv,
+    );
 
     const { id, hostPort } = await runContainer({
       image: tag,
@@ -2512,11 +2534,13 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
       // rolling back means starting a fresh container from that same image.
       const tag = "podkit-" + slug + ":" + target.version;
       const name = "podkit-app-" + slug + "-" + randomBytes(3).toString("hex");
-      const envRows = await store.listEnv(project.id);
-      const env: Record<string, string> = {};
-      for (const row of envRows) {
-        env[row.key] = row.value;
-      }
+      // A rollback starts a FRESH container from the cached image, so
+      // DATABASE_URL must be re-injected or the rolled-back app loses its DB
+      // (EROFS via the pglite fallback).
+      const env = buildContainerEnv(
+        await store.getProjectDbUrl(project.id),
+        await store.listEnv(project.id),
+      );
 
       let started: { id: string; hostPort: number };
       try {

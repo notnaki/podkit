@@ -60,9 +60,11 @@ vi.mock("@podkit/cloud-store", () => {
       recordDeployment: async () => {
         throw new Error("simulated DB write failure");
       },
+      // The rollback path re-injects DATABASE_URL into the re-run container, so
+      // it reads the project's DB url before starting the container.
+      getProjectDbUrl: async () => "postgres://scoped",
       // Anything else would indicate the route changed shape unexpectedly.
       setProjectDbUrl: notImplemented("setProjectDbUrl"),
-      getProjectDbUrl: notImplemented("getProjectDbUrl"),
       listDeployments: notImplemented("listDeployments"),
     }),
   };
