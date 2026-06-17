@@ -171,9 +171,9 @@ function Tutorial() {
 pnpm install
 podkit dev   # open http://localhost:3000`}</Block>
       <p>
-        The scaffold gives you <code>app/routes/index.tsx</code> (with a loader),
-        <code>app/routes/about.tsx</code>, and a shared{" "}
-        <code>app/entry-client.tsx</code>.
+        The scaffold gives you <code>app/routes/index.tsx</code> (with a loader)
+        and <code>app/routes/about.tsx</code>. The client hydration entry is owned
+        by the framework — you don't write one.
       </p>
 
       <h3>2 · Add a dynamic route with a typed loader</h3>
@@ -263,7 +263,7 @@ function Framework() {
       about.tsx        # "/about"
       posts/[slug].tsx # "/posts/:slug"  (dynamic)
       docs/[...path].tsx # "/docs/*"      (catch-all)
-    entry-client.tsx   # shared client entry (hydrates the server markup)
+      _layout.tsx      # optional: wraps routes beside/below it
     db/                # optional: schema.ts + migrations/ (see Database)
   package.json         # scripts: podkit dev | build | start
   .podkit/             # build output, local telemetry (gitignored)`}</Block>
@@ -332,17 +332,21 @@ type LoaderData<L> = L extends (...a: never[]) => infer R
         valid token — always handle that case.
       </p>
 
-      <h3>SSR</h3>
+      <h3>SSR &amp; hydration</h3>
       <p>
         On each request the matched route's default export — wrapped in its
         layout chain — is rendered to HTML with React's{" "}
-        <code>renderToString</code> and the loader data is embedded on{" "}
-        <code>window.__PODKIT_DATA__</code>. Data is JSON-serialized, so loader
-        return values must be JSON-safe. The current model is prop-based SSR:
-        components receive their data as the <code>data</code> prop, and writes go
-        through <code>action</code> form posts. (Full client hydration —
-        re-mounting components for client interactivity — is on the roadmap; the
-        scaffolded <code>app/entry-client.tsx</code> is a no-op until then.)
+        <code>renderToString</code>, and the loader data plus the matched route id
+        are embedded on <code>window.__PODKIT_DATA__</code> /{" "}
+        <code>window.__PODKIT_ROUTE__</code>. Data is JSON-serialized, so loader
+        return values must be JSON-safe. The framework-owned client entry then{" "}
+        <strong>hydrates</strong> that markup: it loads the same route + layout
+        components, rebuilds the tree with the embedded data, and calls{" "}
+        <code>hydrateRoot</code> — so components with <code>useState</code>,
+        effects, and event handlers become interactive in the browser. Server-only
+        route code (<code>loader</code>/<code>action</code> and their{" "}
+        <code>node:</code>/<code>@podkit/db</code> imports) is stripped from the
+        client bundle, so it never ships to the browser.
       </p>
 
       <h3>Build &amp; serve</h3>

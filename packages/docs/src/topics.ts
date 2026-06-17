@@ -40,7 +40,14 @@ wraps the routes under \`<dir>\`, nested inside the root layout. A layout is a
 presentational component that receives the page element as \`children\` (plus the
 route's loader \`data\`) — use it for shared chrome like nav and footers. Layouts
 are matched outermost-first and don't have their own loaders yet. Files beginning
-with \`_\` are never routes.`,
+with \`_\` are never routes.
+
+After SSR the framework **hydrates** the page in the browser: it ships a client
+bundle (owned by the framework — apps don't write \`entry-client.tsx\`) that
+re-mounts the same route + layout components with the embedded data, so
+\`useState\`, effects, and event handlers work. Server-only route code
+(\`loader\`/\`action\` and the \`node:\`/\`@podkit/db\` imports they use) is stripped
+from that bundle, so it never reaches the browser.`,
   },
   db: {
     topic: "db",

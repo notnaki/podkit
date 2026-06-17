@@ -1,8 +1,9 @@
 import { build as viteBuild } from "vite";
 import react from "@vitejs/plugin-react";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
 import { buildRouteTable, findLayouts } from "../routing/discover.ts";
+import { podkitPlugins, CLIENT_ENTRY_SOURCE } from "./plugin.ts";
 import { writeManifest, type BuildManifest, type BuildManifestRoute } from "./manifest.ts";
 
 function listFiles(dir: string, root = dir): string[] {
@@ -55,8 +56,10 @@ export interface BuildAppResult {
  * Produce a production build of a podkit app.
  *
  * Three steps:
- *  1. Vite client build: bundles app/entry-client.tsx into hashed assets under
- *     <outDir>/client with a manifest.json (drives the hashed <script> path).
+ *  1. Vite client build: bundles the framework-owned hydration entry (which
+ *     pulls the per-app route table from virtual:podkit-routes) into hashed
+ *     assets under <outDir>/client with a manifest.json (drives the hashed
+ *     <script> path). The podkit plugin strips server-only route code here.
  *  2. Vite SSR build: pre-compiles every discovered route module into an ESM
  *     file under <outDir>/server/routes/<slug>-SSR.js, with react/react-dom
  *     kept external. The prod server dynamically imports these directly — no
@@ -77,13 +80,19 @@ export async function buildApp(
   const clientOutDir = join(outDir, "client");
   const serverOutDir = join(outDir, "server");
 
-  const clientEntrySrc = join(appRoot, "app", "entry-client.tsx");
+  // The framework owns the client entry (hydration bootstrap). Write it under
+  // the build dir and feed it to Vite as the client input; it pulls the per-app
+  // route table from the plugin's virtual:podkit-routes module.
+  mkdirSync(outDir, { recursive: true });
+  const clientEntrySrc = join(outDir, "client-entry.tsx");
+  writeFileSync(clientEntrySrc, CLIENT_ENTRY_SOURCE);
 
-  // (1) Client build — single shared hydration entry, hashed + manifest.
+  // (1) Client build — framework hydration entry, hashed + manifest. The podkit
+  // plugins serve the virtual route table and strip server-only route code.
   await viteBuild({
     root: appRoot,
     logLevel: "warn",
-    plugins: [react()],
+    plugins: [react(), ...(podkitPlugins(appRoot) as never[])],
     build: {
       outDir: clientOutDir,
       emptyOutDir: true,

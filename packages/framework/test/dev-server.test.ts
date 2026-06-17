@@ -37,6 +37,16 @@ describe("dev server", () => {
     expect(res.status).toBe(404);
   });
 
+  it("wires the client hydration entry + route id, and strips server code in dev", async () => {
+    const html = await (await fetch(`${base}/counter`)).text();
+    expect(html).toContain('window.__PODKIT_ROUTE__ = "counter.tsx"');
+    expect(html).toContain('src="/.podkit/client-entry.tsx"');
+    // The dev-transformed client module must not carry the loader's node:crypto.
+    const mod = await (await fetch(`${base}/app/routes/counter.tsx`)).text();
+    expect(mod).not.toContain("node:crypto");
+    expect(mod).not.toContain("randomUUID");
+  });
+
   it("wraps routes in the root _layout and nests deeper layouts", async () => {
     const home = await (await fetch(`${base}/`)).text();
     expect(home).toContain('<div data-layout="root">');

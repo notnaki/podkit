@@ -19,7 +19,7 @@ let clientEntry: string;
 
 beforeAll(async () => {
   const result = await buildApp(appRoot, buildDir);
-  expect(result.routeCount).toBe(6);
+  expect(result.routeCount).toBe(7);
   expect(result.clientEntry).toMatch(/^\/client\/entry-[A-Za-z0-9_-]+\.js$/);
   clientEntry = result.clientEntry;
   server = await createProdServer({ appRoot, buildDir, port: 0 });
@@ -122,7 +122,7 @@ describe("prod build output", () => {
     const manifest = JSON.parse(
       readFileSync(join(buildDir, "build-manifest.json"), "utf8"),
     ) as { routes: { serverFile: string }[] };
-    expect(manifest.routes).toHaveLength(6);
+    expect(manifest.routes).toHaveLength(7);
     for (const route of manifest.routes) {
       const mod = readFileSync(join(buildDir, "server", route.serverFile), "utf8");
       expect(mod.length).toBeGreaterThan(0);

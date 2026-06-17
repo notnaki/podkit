@@ -144,7 +144,7 @@ export async function createProdServer(opts: ProdServerOptions) {
       const layoutMods = await Promise.all(
         (layoutsByPattern.get(m.route.pattern) ?? []).map((lf) => loadModule(lf)),
       );
-      const html = await renderPage(mod, data, manifest.clientEntry, layoutMods);
+      const html = await renderPage(mod, data, manifest.clientEntry, m.route.file, layoutMods);
       status = 200;
       res.statusCode = 200;
       res.setHeader("content-type", "text/html");

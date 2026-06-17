@@ -10,6 +10,7 @@ export async function renderPage(
   mod: RouteModule,
   data: unknown,
   clientEntry: string,
+  routeId: string,
   layouts: RouteModule[] = [],
 ): Promise<string> {
   const Component = mod.default as PageComponent | undefined;
@@ -20,5 +21,5 @@ export async function renderPage(
     if (Layout) tree = createElement(Layout, { data, children: tree });
   }
   const appHtml = tree ? renderToString(tree) : "";
-  return htmlDocument(appHtml, data, clientEntry);
+  return htmlDocument(appHtml, data, clientEntry, routeId);
 }

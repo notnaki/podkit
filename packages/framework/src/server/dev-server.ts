@@ -1,8 +1,9 @@
 import { createServer as createViteServer, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { createServer as createHttpServer, type Server } from "node:http";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { podkitPlugins, CLIENT_ENTRY_SOURCE } from "../build/plugin.ts";
 import { randomBytes } from "node:crypto";
 import { verifyToken } from "@podkit/auth";
 import { createSink } from "@podkit/telemetry";
@@ -36,9 +37,15 @@ export async function createDevServer(opts: DevServerOptions) {
   const allFiles = listFiles(routesDir).map((f) => f.split("\\").join("/"));
   const table = buildRouteTable(allFiles);
 
+  // The framework owns the client entry (hydration bootstrap); write it under
+  // .podkit so Vite can serve + transform it like any app file.
+  const podkitDir = join(opts.appRoot, ".podkit");
+  mkdirSync(podkitDir, { recursive: true });
+  writeFileSync(join(podkitDir, "client-entry.tsx"), CLIENT_ENTRY_SOURCE);
+
   const vite: ViteDevServer = await createViteServer({
     root: opts.appRoot,
-    plugins: [react()],
+    plugins: [react(), ...(podkitPlugins(opts.appRoot) as never[])],
     appType: "custom",
     // Give HMR's websocket a unique high port instead of Vite's fixed default
     // (24678). The fixed port collides when multiple dev servers run at once
@@ -52,7 +59,7 @@ export async function createDevServer(opts: DevServerOptions) {
     },
   });
 
-  const clientEntry = "/app/entry-client.tsx";
+  const clientEntry = "/.podkit/client-entry.tsx";
 
   const sink = createSink({ file: join(opts.appRoot, ".podkit/telemetry/events.jsonl") });
 
@@ -93,7 +100,7 @@ export async function createDevServer(opts: DevServerOptions) {
             (lf) => vite.ssrLoadModule(join(routesDir, lf)) as Promise<RouteModule>,
           ),
         ));
-        const html = await renderPage(mod, data, clientEntry, layoutMods);
+        const html = await renderPage(mod, data, clientEntry, m.route.file, layoutMods);
         status = 200;
         res.statusCode = 200;
         res.setHeader("content-type", "text/html");
