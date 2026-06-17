@@ -4,6 +4,7 @@ export {
   stopContainer,
   runningContainerNames,
   containerLogs,
+  streamContainerLogs,
   waitForReadiness,
 } from "./docker.ts";
 export type {
@@ -11,6 +12,7 @@ export type {
   BuildImageResult,
   RunContainerOptions,
   RunContainerResult,
+  ContainerLogStream,
 } from "./docker.ts";
 export {
   isPodkitApp,

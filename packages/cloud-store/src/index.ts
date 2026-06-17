@@ -11,4 +11,6 @@ export {
   emailVerifyTokens,
   cliSessions,
   blobs,
+  projectMembers,
+  projectInvites,
 } from "./schema.ts";

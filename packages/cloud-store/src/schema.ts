@@ -82,6 +82,29 @@ export const cliSessions = pgTable("cli_auth_sessions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// ponytail: project-level roles as plain text; upgrade to full org/RBAC if teams grow.
+export const projectMembers = pgTable(
+  "project_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").notNull(),
+    accountId: text("account_id").notNull(),
+    role: text("role").notNull().default("member"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => [unique().on(t.projectId, t.accountId)],
+);
+
+export const projectInvites = pgTable("project_invites", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  projectId: uuid("project_id").notNull(),
+  email: text("email").notNull(),
+  role: text("role").notNull().default("member"),
+  token: text("token").unique().notNull(),
+  accepted: boolean("accepted").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 // ponytail: bytea storage in Postgres; fine for small assets (< a few MB per blob).
 // Upgrade to S3-compatible object store (presigned URLs) if large files or high
 // throughput matter; the store interface stays the same, only the backing changes.
@@ -100,4 +123,20 @@ export const blobs = pgTable(
     createdAt: timestamp("created_at").defaultNow(),
   },
   (t) => [unique().on(t.projectId, t.key)],
+);
+
+export const crons = pgTable(
+  "crons",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id").notNull(),
+    name: text("name").notNull(),
+    schedule: text("schedule").notNull(),
+    path: text("path").notNull(),
+    method: text("method").notNull().default("GET"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastRunAt: timestamp("last_run_at"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => [unique().on(t.projectId, t.name)],
 );

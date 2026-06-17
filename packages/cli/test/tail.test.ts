@@ -89,29 +89,45 @@ describe("acceptLines (raw log-line dedup)", () => {
   });
 });
 
-describe("followCloudLogs (cloud polling follow loop)", () => {
-  it("polls with a moving ISO since cursor and prints only new lines", async () => {
-    const blobs = ["line1\nline2\n", "line2\nline3\n", "line3\n"];
-    let poll = 0;
-    const sinceSeen: (string | undefined)[] = [];
+describe("followCloudLogs (SSE stream follow)", () => {
+  it("parses SSE events and emits each log line", async () => {
+    // Build a minimal fake SSE body: two data events.
+    const sseBody =
+      ': connected\n\n' +
+      'data: {"line":"line1"}\n\n' +
+      'data: {"line":"line2"}\n\n';
+
+    const encoder = new TextEncoder();
+    const encoded = encoder.encode(sseBody);
+
+    // A one-shot ReadableStream that yields the whole body then closes.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoded);
+        controller.close();
+      },
+    });
 
     const emitted: string[] = [];
     await followCloudLogs("myapp", {
-      fetch: async (_slug, since) => {
-        sinceSeen.push(since);
-        return blobs[Math.min(poll, blobs.length - 1)]!;
-      },
+      fetchStream: async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
       emit: (line) => emitted.push(line),
-      now: () => new Date(1000 * (poll + 1)),
-      sleep: async () => {
-        poll++;
-      },
-      stop: () => poll >= 3,
     });
 
-    expect(emitted).toEqual(["line1", "line2", "line3"]);
-    // First poll has no cursor; later polls carry an ISO timestamp.
-    expect(sinceSeen[0]).toBeUndefined();
-    expect(sinceSeen[1]).toBe(new Date(1000).toISOString());
+    expect(emitted).toEqual(["line1", "line2"]);
+  });
+
+  it("returns a network error when fetchStream rejects", async () => {
+    const result = await followCloudLogs("myapp", {
+      fetchStream: async () => { throw new Error("conn refused"); },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe("E_NETWORK");
+    }
   });
 });

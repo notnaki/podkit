@@ -6,7 +6,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { ok, fail, type Envelope } from "../envelope.ts";
 import { PodkitError } from "../errors.ts";
 import { readAuth, writeAuth, clearAuth } from "../auth-store.ts";
-import { acceptLines, initLineTailState, type LineTailState } from "./tail.ts";
 
 type Method = "GET" | "POST" | "DELETE" | "PUT";
 
@@ -325,7 +324,11 @@ type PollResponse = {
 };
 
 const AVAILABLE =
-  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug> [--follow|-f], env, domains, branches, preview <slug> <branchName>, blob, login [--url <url>], logout, whoami";
+  "Available: projects, create <slug>, deploy <slug> (one-click; flags optional: [--contextDir=<dir>] [--containerPort=3000] [--appSubpath=<path>]), url <slug>, open <slug>, status <slug>, deployments <slug>, rollback <slug> <deploymentId>, logs <slug> [--follow|-f], env, domains, branches, cron, preview <slug> <branchName>, blob, members <slug>, invite <slug> <email> [role], invite accept <token>, member rm <slug> <accountId>, login [--url <url>], logout, whoami";
+
+const MEMBERS_HINT = "podkit cloud members <slug> [--table]";
+const INVITE_HINT =
+  "podkit cloud invite <slug> <email> [role] | invite accept <token>";
 
 // `deploy` is one-click: from your app directory, run `podkit cloud deploy <slug>`
 // with NO other flags. The CLI tars the current directory (excluding
@@ -357,6 +360,9 @@ const PREVIEW_HINT =
 const BLOB_HINT =
   "podkit cloud blob put <slug> <key> <file> | get <slug> <key> [outFile] | ls <slug> [--table] | rm <slug> <key> | url <slug> <key> [--exp <sec>]";
 
+const CRON_HINT =
+  "podkit cloud cron add <slug> <name> <schedule> <path> [--method=GET|POST] | list <slug> [--table] | rm <slug> <name>  (schedule: @hourly, @daily, @every <N>m, @every <N>h, */<N>)";
+
 // Parse a `--flag=value` style option out of an argv slice. Returns null when
 // the flag is absent or has no value.
 function parseFlag(args: string[], flag: string): string | null {
@@ -367,59 +373,129 @@ function parseFlag(args: string[], flag: string): string | null {
   return null;
 }
 
-// Fetches one batch of container logs for `slug` since an optional ISO cursor.
-// Returns the raw log blob (text). Injectable for tests via the deps param.
-export type CloudLogFetch = (slug: string, since: string | undefined) => Promise<string>;
+// ---------------------------------------------------------------------------
+// SSE log streaming (replaces the old poll loop for `--follow`).
+// ---------------------------------------------------------------------------
 
-const fetchCloudLogs: CloudLogFetch = async (slug, since) => {
-  const qs = since ? `?since=${encodeURIComponent(since)}` : "";
-  const res = await callControlPlane("GET", `/v1/projects/${slug}/logs${qs}`);
-  if (!res.ok) return "";
-  const data = res.data as { logs?: unknown };
-  return typeof data.logs === "string" ? data.logs : "";
-};
-
-export interface CloudFollowDeps {
-  fetch?: CloudLogFetch;
-  emit?: (line: string) => void;
-  sleep?: (ms: number) => Promise<void>;
-  now?: () => Date;
-  intervalMs?: number;
-  stop?: () => boolean;
-  state?: LineTailState;
+/**
+ * Parse a raw SSE chunk buffer into complete `data: ...` lines.
+ * Returns the parsed JSON values (one per `data:` line in a double-newline
+ * delimited event). Leftover bytes are returned as the new `buf`.
+ *
+ * Exported for unit tests.
+ */
+export function parseSseChunk(
+  buf: string,
+  rawChunk: string,
+): { buf: string; values: unknown[] } {
+  buf += rawChunk;
+  const values: unknown[] = [];
+  // SSE events are separated by blank lines (\n\n).
+  const events = buf.split("\n\n");
+  // Last element is the incomplete trailing fragment (may be "").
+  buf = events.pop() ?? "";
+  for (const event of events) {
+    for (const line of event.split("\n")) {
+      if (line.startsWith("data: ")) {
+        const raw = line.slice(6);
+        try {
+          values.push(JSON.parse(raw));
+        } catch {
+          // Malformed data line; skip.
+        }
+      }
+      // Comment lines (`:`) and other fields (retry:, event:, id:) are ignored.
+    }
+  }
+  return { buf, values };
 }
 
-// Polls the cloud logs endpoint with a moving ISO `?since` cursor and prints
-// only new lines, de-duping the inclusive (second-granularity) overlap via
-// acceptLines. Runs until stop() is true (Ctrl-C kills the process in the CLI).
-//
-// ponytail: client-side polling tail — NOT server push/SSE/websocket. The
-// `?since` cursor is advanced to the request time each poll; docker's
-// second-granularity `--since` means the boundary second re-appears, which the
-// line de-dup window absorbs. Upgrade path: a streaming logs endpoint.
+export interface CloudFollowDeps {
+  // Injectable fetch for tests.
+  fetchStream?: (url: string, headers: Record<string, string>) => Promise<Response>;
+  emit?: (line: string) => void;
+  stop?: () => boolean;
+}
+
+/**
+ * Consume the /v1/projects/:slug/logs/stream SSE endpoint and print each log
+ * line to stdout. Runs until the server closes the stream or stop() is true.
+ *
+ * Uses Node 22 global fetch + ReadableStream to read the body incrementally —
+ * no EventSource (not available in Node), no extra deps.
+ *
+ * // ponytail: single-stream consumer; reconnect-on-drop can be added if needed.
+ * The de-dup `acceptLines` safety net from the old poll loop is kept as a
+ * comment reminder — SSE delivers each line exactly once per connection, so
+ * de-dup is not needed here unless we add reconnect logic.
+ */
 export async function followCloudLogs(
   slug: string,
   deps: CloudFollowDeps = {},
 ): Promise<Envelope<unknown>> {
-  const fetchLogs = deps.fetch ?? fetchCloudLogs;
+  const fetchStream = deps.fetchStream ?? (
+    (url, headers) => fetch(url, { headers })
+  );
   const emit = deps.emit ?? ((line) => process.stdout.write(line + "\n"));
-  const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
-  const now = deps.now ?? (() => new Date());
-  const intervalMs = deps.intervalMs ?? 1500;
   const stop = deps.stop ?? (() => false);
-  const state = deps.state ?? initLineTailState();
 
-  let since: string | undefined;
-  while (!stop()) {
-    const requestedAt = now();
-    const blob = await fetchLogs(slug, since);
-    for (const line of acceptLines(state, blob)) emit(line);
-    // Advance the cursor to this request's time so the next poll only asks for
-    // newer lines; the de-dup window covers the inclusive-second overlap.
-    since = requestedAt.toISOString();
-    if (stop()) break;
-    await sleep(intervalMs);
+  const base = resolveBase();
+  const url = `${base}/v1/projects/${encodeURIComponent(slug)}/logs/stream`;
+  const headers: Record<string, string> = {
+    ...authHeaders(),
+    "accept": "text/event-stream",
+  };
+
+  let response: Response;
+  try {
+    response = await fetchStream(url, headers);
+  } catch {
+    return fail(
+      new PodkitError(
+        "E_NETWORK",
+        "control-plane unreachable",
+        "is it running? set PODKIT_API_URL",
+      ),
+    );
   }
+
+  if (!response.ok) {
+    return fail(
+      new PodkitError(
+        "E_NETWORK",
+        "logs/stream returned HTTP " + response.status,
+        "check your credentials and project slug",
+      ),
+    );
+  }
+
+  if (!response.body) {
+    return fail(new PodkitError("E_NETWORK", "no response body"));
+  }
+
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  while (!stop()) {
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch {
+      // Stream closed or network error; treat as clean end.
+      break;
+    }
+    if (chunk.done) break;
+    const { buf: nextBuf, values } = parseSseChunk(buf, decoder.decode(chunk.value, { stream: true }));
+    buf = nextBuf;
+    for (const v of values) {
+      if (v && typeof v === "object" && "line" in v && typeof (v as { line: unknown }).line === "string") {
+        emit((v as { line: string }).line);
+      }
+    }
+  }
+
+  reader.releaseLock();
   return ok({ followed: true });
 }
 
@@ -669,6 +745,63 @@ async function branchesCommand(rest: string[]): Promise<Envelope<unknown>> {
   );
 }
 
+async function cronCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [action, ...cronRest] = rest;
+
+  if (action === "add") {
+    const [slug, name, schedule, path] = cronRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "cron add requires a slug", CRON_HINT));
+    if (!name) return fail(new PodkitError("E_BAD_ARGS", "cron add requires a name", CRON_HINT));
+    if (!schedule) return fail(new PodkitError("E_BAD_ARGS", "cron add requires a schedule", CRON_HINT));
+    if (!path) return fail(new PodkitError("E_BAD_ARGS", "cron add requires a path", CRON_HINT));
+    const method = parseFlag(cronRest, "--method") ?? "GET";
+    if (method !== "GET" && method !== "POST") {
+      return fail(new PodkitError("E_BAD_ARGS", "--method must be GET or POST", CRON_HINT));
+    }
+    return await callControlPlane("POST", `/v1/projects/${slug}/crons`, {
+      name,
+      schedule,
+      path,
+      method,
+    });
+  }
+
+  if (action === "list") {
+    const [slug] = cronRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "cron list requires a slug", CRON_HINT));
+    const res = await callControlPlane("GET", `/v1/projects/${slug}/crons`);
+    if (cronRest.includes("--table") && res.ok) {
+      const data = res.data as { crons?: unknown };
+      const list = Array.isArray(data?.crons) ? data.crons : [];
+      const rows = list.map((c: Record<string, unknown>) => ({
+        name: String(c?.name ?? ""),
+        schedule: String(c?.schedule ?? ""),
+        path: String(c?.path ?? ""),
+        method: String(c?.method ?? ""),
+        enabled: String(c?.enabled ?? ""),
+        lastRunAt: String(c?.lastRunAt ?? ""),
+      }));
+      return ok(formatTable(rows));
+    }
+    return res;
+  }
+
+  if (action === "rm") {
+    const [slug, name] = cronRest;
+    if (!slug) return fail(new PodkitError("E_BAD_ARGS", "cron rm requires a slug", CRON_HINT));
+    if (!name) return fail(new PodkitError("E_BAD_ARGS", "cron rm requires a name", CRON_HINT));
+    return await callControlPlane("DELETE", `/v1/projects/${slug}/crons/${name}`);
+  }
+
+  return fail(
+    new PodkitError(
+      "E_BAD_ARGS",
+      action ? `Unknown cron action: ${action}` : "cron requires an action",
+      CRON_HINT,
+    ),
+  );
+}
+
 async function envCommand(rest: string[]): Promise<Envelope<unknown>> {
   const [action, ...envRest] = rest;
 
@@ -725,6 +858,92 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+// `members <slug> [--table]` — list project members
+async function membersCommand(
+  slug: string,
+  wantsTable: boolean,
+): Promise<Envelope<unknown>> {
+  const res = await callControlPlane(
+    "GET",
+    `/v1/projects/${encodeURIComponent(slug)}/members`,
+  );
+  if (res.ok && wantsTable) {
+    const data = res.data as { members?: unknown[] };
+    const list = Array.isArray(data?.members) ? data.members : [];
+    const rows: Record<string, string>[] = list.map((m: unknown) => {
+      const member = m as { accountId?: unknown; role?: unknown; createdAt?: unknown };
+      return {
+        accountId: String(member?.accountId ?? ""),
+        role: String(member?.role ?? ""),
+        createdAt: String(member?.createdAt ?? ""),
+      };
+    });
+    return ok(formatTable(rows));
+  }
+  return res;
+}
+
+// `invite <slug> <email> [role]` | `invite accept <token>` | `member rm <slug> <accountId>`
+async function inviteCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [first, ...inviteRest] = rest;
+
+  if (first === "accept") {
+    const [token] = inviteRest;
+    if (!token) {
+      return fail(
+        new PodkitError("E_BAD_ARGS", "invite accept requires a token", INVITE_HINT),
+      );
+    }
+    return await callControlPlane(
+      "POST",
+      `/v1/invites/${encodeURIComponent(token)}/accept`,
+    );
+  }
+
+  // `invite <slug> <email> [role]`
+  const slug = first;
+  const [email, role] = inviteRest;
+  if (!slug) {
+    return fail(
+      new PodkitError("E_BAD_ARGS", "invite requires a slug", INVITE_HINT),
+    );
+  }
+  if (!email) {
+    return fail(
+      new PodkitError("E_BAD_ARGS", "invite requires an email", INVITE_HINT),
+    );
+  }
+  const body: { email: string; role?: string } = { email };
+  if (role) body.role = role;
+  return await callControlPlane(
+    "POST",
+    `/v1/projects/${encodeURIComponent(slug)}/invites`,
+    body,
+  );
+}
+
+async function memberRmCommand(rest: string[]): Promise<Envelope<unknown>> {
+  const [slug, accountId] = rest;
+  if (!slug) {
+    return fail(
+      new PodkitError("E_BAD_ARGS", "member rm requires a slug", MEMBERS_HINT),
+    );
+  }
+  if (!accountId) {
+    return fail(
+      new PodkitError(
+        "E_BAD_ARGS",
+        "member rm requires an accountId",
+        MEMBERS_HINT,
+      ),
+    );
+  }
+  return await callControlPlane(
+    "DELETE",
+    `/v1/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(accountId)}`,
+  );
 }
 
 async function login(rest: string[]): Promise<Envelope<unknown>> {
@@ -1082,12 +1301,44 @@ export async function cloudCommand(args: string[]): Promise<Envelope<unknown>> {
       return await branchesCommand(rest);
     }
 
+    if (subcommand === "cron") {
+      return await cronCommand(rest);
+    }
+
     if (subcommand === "preview") {
       return await previewCommand(rest);
     }
 
     if (subcommand === "blob") {
       return await blobCommand(rest, wantsTable);
+    }
+
+    if (subcommand === "members") {
+      const [slug] = rest;
+      if (!slug) {
+        return fail(
+          new PodkitError("E_BAD_ARGS", "members requires a slug", MEMBERS_HINT),
+        );
+      }
+      return await membersCommand(slug, wantsTable);
+    }
+
+    if (subcommand === "invite") {
+      return await inviteCommand(rest);
+    }
+
+    if (subcommand === "member") {
+      const [action, ...memberRest] = rest;
+      if (action === "rm") {
+        return await memberRmCommand(memberRest);
+      }
+      return fail(
+        new PodkitError(
+          "E_BAD_ARGS",
+          action ? `Unknown member action: ${action}` : "member requires an action (rm)",
+          MEMBERS_HINT,
+        ),
+      );
     }
 
     if (subcommand === "login") {

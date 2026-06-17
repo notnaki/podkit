@@ -1,5 +1,6 @@
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
@@ -28,6 +29,7 @@ import {
   stopContainer,
   runningContainerNames,
   containerLogs,
+  streamContainerLogs,
   isPodkitApp,
   buildPodkitApp,
   waitForReadiness,
@@ -65,9 +67,12 @@ import {
   verifyToken,
   resolveAuthSecret,
   sendEmail,
+  roleAtLeast,
 } from "@podkit/auth";
+import type { Role } from "@podkit/auth";
 import { checkAccountCaps, type AccountCaps } from "./account-caps.ts";
 import { signBlob, verifyBlob } from "./blob-sign.ts";
+import { isValidSchedule, isDue } from "./cron-schedule.ts";
 
 export type CreateCloudOptions = {
   controlPlaneConnectionString: string;
@@ -234,6 +239,12 @@ function isSelectOnly(sql: string): boolean {
 // (never sanitize) so two distinct requests can't collide on the same DB.
 function isValidBranchName(name: unknown): name is string {
   return typeof name === "string" && /^[a-z0-9][a-z0-9_]{0,49}$/.test(name);
+}
+
+// Cron name: lowercase alphanumeric + dash/underscore, must start alphanumeric,
+// max 50 chars. Mirrors the branch-name validation.
+function isValidCronName(name: unknown): name is string {
+  return typeof name === "string" && /^[a-z0-9][a-z0-9_-]{0,49}$/.test(name);
 }
 
 // Broad classes of system / shared directories a build context must never point
@@ -570,6 +581,19 @@ async function extractTarGz(
   }
 }
 
+// Pure helper: decide project access from owner/member facts. Exported for
+// unit tests (avoids spinning up a real store or HTTP server).
+// ponytail: project-level roles as text; upgrade to full org/RBAC if teams grow.
+export function decideProjectAccess(
+  accountId: string,
+  ownerAccountId: string,
+  memberRole: string | null,
+): "ok" | "forbidden" {
+  if (accountId === ownerAccountId) return "ok";
+  if (memberRole !== null) return "ok"; // any membership grants read+op access
+  return "forbidden";
+}
+
 export function createCloud(opts: CreateCloudOptions): Cloud {
   const store = createStore({
     connectionString: opts.controlPlaneConnectionString,
@@ -664,17 +688,34 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
   }
 
   // Authorize access to a specific project. The machine API key grants full
-  // access; otherwise a valid bearer token is required AND the account must own
-  // the project. Returns a discriminant the caller maps to a 401/403 response.
+  // access; otherwise a valid bearer token is required AND the account must be
+  // the owner OR a member of the project. Returns a discriminant the caller
+  // maps to a 401/403 response.
   async function authorizeProject(
     headers: Record<string, string | string[] | undefined>,
-    project: { owner: string },
+    project: { id: string; owner: string },
   ): Promise<"ok" | "unauth" | "forbidden"> {
     if (requireApiKey(headers, apiKey)) return "ok";
     const auth = await accountFromAuth(headers);
     if (!auth) return "unauth";
-    if (project.owner !== auth.accountId) return "forbidden";
-    return "ok";
+    const memberRole = await store.isMember(project.id, auth.accountId);
+    return decideProjectAccess(auth.accountId, project.owner, memberRole);
+  }
+
+  // Authorize management actions on a project (invite/remove members, delete).
+  // Requires owner OR member with role >= 'admin'. Members with role 'member' or
+  // 'viewer' are denied. The machine API key is always authorized.
+  async function authorizeProjectManage(
+    headers: Record<string, string | string[] | undefined>,
+    project: { id: string; owner: string },
+  ): Promise<"ok" | "unauth" | "forbidden"> {
+    if (requireApiKey(headers, apiKey)) return "ok";
+    const auth = await accountFromAuth(headers);
+    if (!auth) return "unauth";
+    if (project.owner === auth.accountId) return "ok";
+    const memberRole = await store.isMember(project.id, auth.accountId);
+    if (memberRole !== null && roleAtLeast(memberRole as Role, "admin")) return "ok";
+    return "forbidden";
   }
 
   // When set, app containers join this Docker network and the gateway reaches
@@ -944,6 +985,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
 
   let reaperTimer: ReturnType<typeof setInterval> | undefined;
   let livenessTimer: ReturnType<typeof setInterval> | undefined;
+  let cronTimer: ReturnType<typeof setInterval> | undefined;
   if (coldStartEnabled) {
     // Sweep at least once a minute (and never slower than the timeout itself).
     reaperTimer = setInterval(reapIdleContainers, Math.min(idleMs, 60_000));
@@ -3346,6 +3388,259 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     },
   );
 
+  // --- Team invite / membership routes ------------------------------------
+  // ponytail: project-level roles as text; upgrade to full org/RBAC if teams grow.
+
+  // POST /v1/projects/:slug/invites {email, role?}
+  // Requires owner/admin. Creates an invite token; returns the token + acceptUrl.
+  router.register(
+    "POST",
+    "/v1/projects/:slug/invites",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProjectManage(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const b = (body ?? {}) as { email?: string; role?: string };
+      if (!b.email || typeof b.email !== "string") {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "email required", "POST /v1/projects/:slug/invites {email, role?}"),
+        };
+      }
+      const role = typeof b.role === "string" ? b.role : "member";
+      const token = randomUUID();
+      await store.addInvite({ projectId: project.id, email: b.email, role, token });
+      return {
+        status: 200,
+        body: ok({ token, acceptUrl: `/#/invite/${token}` }),
+      };
+    },
+  );
+
+  // GET /v1/projects/:slug/members — list members (read access)
+  router.register(
+    "GET",
+    "/v1/projects/:slug/members",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      const members = await store.listMembers(project.id);
+      return { status: 200, body: ok({ members }) };
+    },
+  );
+
+  // DELETE /v1/projects/:slug/members/:accountId — remove a member (manage)
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/members/:accountId",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const accountId = params.accountId!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProjectManage(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      await store.removeMember(project.id, accountId);
+      return { status: 200, body: ok({ removed: accountId }) };
+    },
+  );
+
+  // POST /v1/invites/:token/accept — any authed account accepts an invite
+  router.register(
+    "POST",
+    "/v1/invites/:token/accept",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const token = params.token!;
+      const auth = await accountFromAuth(headers);
+      // Machine API key has no accountId; require a real bearer token.
+      if (!auth) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invite accept requires a user bearer token",
+            "log in with: podkit cloud login",
+          ),
+        };
+      }
+      const result = await store.acceptInvite(token, auth.accountId);
+      if (!result) {
+        return {
+          status: 404,
+          body: fail("E_NOT_FOUND", "invite not found or already accepted"),
+        };
+      }
+      const projRow = await store.getProjectById(result.projectId);
+      return {
+        status: 200,
+        body: ok({ project: projRow?.slug ?? result.projectId, role: result.role }),
+      };
+    },
+  );
+
+  // ── Cron / scheduled jobs ────────────────────────────────────────────────
+  router.register(
+    "POST",
+    "/v1/projects/:slug/crons",
+    async ({ headers, params, body }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+
+      const b = (body ?? {}) as {
+        name?: unknown;
+        schedule?: unknown;
+        path?: unknown;
+        method?: unknown;
+      };
+      if (!isValidCronName(b.name)) {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "invalid cron name", "name must match ^[a-z0-9][a-z0-9_-]{0,49}$"),
+        };
+      }
+      if (typeof b.path !== "string" || !b.path.startsWith("/")) {
+        return { status: 400, body: fail("E_BAD_ARGS", "path must start with /") };
+      }
+      if (typeof b.schedule !== "string" || !isValidSchedule(b.schedule)) {
+        return {
+          status: 400,
+          body: fail(
+            "E_BAD_ARGS",
+            "invalid schedule",
+            "supported: @hourly, @daily, @every <N>m, @every <N>h, */<N>",
+          ),
+        };
+      }
+      const method = b.method ?? "GET";
+      if (method !== "GET" && method !== "POST") {
+        return { status: 400, body: fail("E_BAD_ARGS", "method must be GET or POST") };
+      }
+      try {
+        const cron = await store.addCron({
+          projectId: project.id,
+          name: b.name,
+          schedule: b.schedule,
+          path: b.path,
+          method,
+        });
+        return { status: 200, body: ok({ id: cron.id, name: b.name }) };
+      } catch {
+        return {
+          status: 400,
+          body: fail("E_BAD_ARGS", "a cron with that name already exists", "use a unique name per project"),
+        };
+      }
+    },
+  );
+
+  router.register("GET", "/v1/projects/:slug/crons", async ({ headers, params }) => {
+    const slug = params.slug!;
+    const project = await store.getProjectBySlug(slug);
+    if (!project) {
+      return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+    }
+    const access = await authorizeProject(headers, project);
+    if (access === "unauth") return unauthorized();
+    if (access === "forbidden") return forbidden();
+    return { status: 200, body: ok({ crons: await store.listCrons(project.id) }) };
+  });
+
+  router.register(
+    "DELETE",
+    "/v1/projects/:slug/crons/:name",
+    async ({ headers, params }) => {
+      if (!(await guardMutation(headers))) return unauthorized();
+      const slug = params.slug!;
+      const name = params.name!;
+      const project = await store.getProjectBySlug(slug);
+      if (!project) {
+        return { status: 404, body: fail("E_NOT_FOUND", "unknown project: " + slug) };
+      }
+      const access = await authorizeProject(headers, project);
+      if (access === "unauth") return unauthorized();
+      if (access === "forbidden") return forbidden();
+      await store.deleteCron(project.id, name);
+      return { status: 200, body: ok({ deleted: name }) };
+    },
+  );
+
+  // Fire one cron against the project's gateway path. Uses the always-available
+  // /_p/<slug><path> route so no custom-domain setup is needed; a sleeping prod
+  // app wakes on the request. gatewayUrl is bound by listen() before any tick.
+  // ponytail: in-process single-node fire, at-least-once, no retries / run history;
+  // upgrade to a durable queue for multi-node or guaranteed-once semantics.
+  function fireCron(slug: string, path: string, method: string): void {
+    if (!gatewayUrl) return;
+    let base: URL;
+    try {
+      base = new URL(gatewayUrl);
+    } catch {
+      return;
+    }
+    const req = httpRequest(
+      {
+        hostname: base.hostname,
+        port: Number(base.port) || 80,
+        path: "/_p/" + slug + path,
+        method,
+        headers: { "user-agent": "podkit-cron/1" },
+      },
+      (res) => res.resume(), // drain so the socket frees
+    );
+    req.setTimeout(10_000, () => req.destroy());
+    req.on("error", () => {}); // per-job errors are non-fatal
+    req.end();
+  }
+
+  // 60s scheduler tick: fire every enabled cron whose schedule is due.
+  async function cronTick(): Promise<void> {
+    let crons: Awaited<ReturnType<typeof store.listEnabledCrons>>;
+    try {
+      crons = await store.listEnabledCrons();
+    } catch {
+      return; // DB unavailable this round — skip silently
+    }
+    const nowMs = Date.now();
+    for (const cron of crons) {
+      try {
+        const lastMs = cron.lastRunAt ? new Date(cron.lastRunAt).getTime() : null;
+        if (!isDue(cron.schedule, lastMs, nowMs)) continue;
+        fireCron(cron.slug, cron.path, cron.method);
+        await store.touchCronRun(cron.id, new Date(nowMs).toISOString());
+      } catch {
+        // One bad cron must never kill the tick.
+      }
+    }
+  }
+
+  cronTimer = setInterval(() => void cronTick(), 60_000);
+  cronTimer.unref?.(); // never keep the process alive for the scheduler alone
+
   // Handle POST /v1/projects/:slug/deploy-upload. The request body is a gzipped
   // tarball of the build context streamed directly to disk (never buffered) with
   // a hard MAX_UPLOAD_BYTES guard (413 on overflow). Secure-by-default ladder,
@@ -3726,6 +4021,130 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
           return;
         }
 
+        // SSE endpoints are handled OUTSIDE the JSON router because they hijack
+        // `res` for a long-lived text/event-stream response and never return a
+        // JSON body.  Auth uses the same ladder as the existing /logs endpoint.
+
+        // EventSource can't send an Authorization header, so SSE GETs also accept
+        // the bearer token as a ?token= query param.
+        // ponytail: token in the URL (same-origin, read-only streams); upgrade to
+        // a short-lived single-use stream ticket if URL logging becomes a concern.
+        const sseAuthHeaders =
+          url.searchParams.has("token") && !req.headers.authorization
+            ? { ...req.headers, authorization: "Bearer " + url.searchParams.get("token")! }
+            : req.headers;
+
+        // GET /v1/projects/:slug/logs/stream  — real-time container log tail.
+        const logsStreamMatch =
+          method === "GET"
+            ? /^\/v1\/projects\/([^/]+)\/logs\/stream$/.exec(url.pathname)
+            : null;
+        if (logsStreamMatch) {
+          const slug = decodeURIComponent(logsStreamMatch[1]!);
+
+          // Auth ladder — same as GET /logs.
+          if (!(await guardMutation(sseAuthHeaders))) {
+            sendJson(res, 401, unauthorized().body);
+            return;
+          }
+          const project = await store.getProjectBySlug(slug);
+          if (!project) {
+            sendJson(res, 404, fail("E_NOT_FOUND", "unknown project: " + slug));
+            return;
+          }
+          const access = await authorizeProject(sseAuthHeaders, project);
+          if (access === "unauth") { sendJson(res, 401, unauthorized().body); return; }
+          if (access === "forbidden") { sendJson(res, 403, forbidden().body); return; }
+
+          // Resolve the active container (mirrors GET /logs).
+          const deployments = await store.listDeployments(project.id);
+          const active = findActiveDeployment(deployments);
+          if (!active || !active.containerId) {
+            // No container to stream; send an immediate done comment and close.
+            res.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache",
+              "connection": "keep-alive",
+            });
+            res.write(": connected\n\n");
+            res.end();
+            return;
+          }
+
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "connection": "keep-alive",
+          });
+          res.write(": connected\n\n");
+
+          const logStream = streamContainerLogs(active.containerId, (line) => {
+            // ponytail: one SSE event per log line; no retry field (reconnect handled client-side).
+            res.write("data: " + JSON.stringify({ line }) + "\n\n");
+          });
+
+          req.on("close", () => {
+            logStream.stop();
+          });
+          // Do not fall through; the response is kept open.
+          return;
+        }
+
+        // GET /v1/projects/:slug/events  — live project status (sleeping/waking/ready).
+        // ponytail: per-connection 1 s tick reading the in-memory sleeping/waking sets;
+        // upgrade to event-driven push off the sets when connection count grows.
+        const eventsMatch =
+          method === "GET"
+            ? /^\/v1\/projects\/([^/]+)\/events$/.exec(url.pathname)
+            : null;
+        if (eventsMatch) {
+          const slug = decodeURIComponent(eventsMatch[1]!);
+
+          if (!(await guardMutation(sseAuthHeaders))) {
+            sendJson(res, 401, unauthorized().body);
+            return;
+          }
+          const project = await store.getProjectBySlug(slug);
+          if (!project) {
+            sendJson(res, 404, fail("E_NOT_FOUND", "unknown project: " + slug));
+            return;
+          }
+          const access = await authorizeProject(sseAuthHeaders, project);
+          if (access === "unauth") { sendJson(res, 401, unauthorized().body); return; }
+          if (access === "forbidden") { sendJson(res, 403, forbidden().body); return; }
+
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "connection": "keep-alive",
+          });
+          res.write(": connected\n\n");
+
+          function currentStatus(): "sleeping" | "waking" | "ready" {
+            if (waking.has(slug)) return "waking";
+            if (sleeping.has(slug)) return "sleeping";
+            return "ready";
+          }
+
+          let last = currentStatus();
+          // Send initial status immediately so the client knows where things stand.
+          res.write("data: " + JSON.stringify({ status: last }) + "\n\n");
+
+          const ticker = setInterval(() => {
+            const now = currentStatus();
+            if (now !== last) {
+              last = now;
+              res.write("data: " + JSON.stringify({ status: now }) + "\n\n");
+            }
+          }, 1000);
+          ticker.unref?.();
+
+          req.on("close", () => {
+            clearInterval(ticker);
+          });
+          return;
+        }
+
         // Upload-based deploy is handled OUTSIDE the JSON router because the body
         // is a (potentially large) gzipped tarball, not JSON: it must NOT go
         // through readJson (1 MiB cap + full in-memory buffering). We stream it
@@ -3811,6 +4230,7 @@ export function createCloud(opts: CreateCloudOptions): Cloud {
     async close(): Promise<void> {
       if (reaperTimer) clearInterval(reaperTimer);
       if (livenessTimer) clearInterval(livenessTimer);
+      if (cronTimer) clearInterval(cronTimer);
       for (const name of runningContainers) {
         try {
           await stopContainer(name);

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { request as httpRequest } from "node:http";
 
@@ -261,6 +261,62 @@ export async function containerLogs(
   args.push(name);
   const { stdout, stderr } = await execFileAsync("docker", args);
   return stdout + stderr;
+}
+
+/** Handle returned by streamContainerLogs. Call stop() to kill the stream. */
+export interface ContainerLogStream {
+  stop(): void;
+}
+
+/**
+ * Stream the logs of a running container in real time. Spawns
+ * `docker logs -f --tail <tail> <name>`, calls `onLine` for each line on
+ * stdout and stderr, and returns a handle whose stop() kills the child.
+ *
+ * // ponytail: line-buffered docker logs -f; fine for one viewer per stream.
+ * Upgrade: a docker events subscription or a fanout registry if N concurrent
+ * viewers per container become common.
+ */
+export function streamContainerLogs(
+  name: string,
+  onLine: (line: string) => void,
+  opts?: { tail?: number },
+): ContainerLogStream {
+  const tail = opts?.tail ?? 100;
+  const args = ["logs", "-f", "--tail", String(tail), name];
+  const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+  // Buffer partial lines per stream (stdout and stderr may arrive in chunks).
+  function attachStream(stream: NodeJS.ReadableStream): void {
+    let buf = "";
+    stream.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf8");
+      const parts = buf.split("\n");
+      // Last element is the incomplete tail (may be "").
+      buf = parts.pop() ?? "";
+      for (const line of parts) {
+        onLine(line);
+      }
+    });
+    stream.on("end", () => {
+      if (buf.length > 0) {
+        onLine(buf);
+        buf = "";
+      }
+    });
+  }
+
+  if (child.stdout) attachStream(child.stdout);
+  if (child.stderr) attachStream(child.stderr);
+
+  // Suppress unhandled error on SIGKILL from stop().
+  child.on("error", () => {});
+
+  return {
+    stop(): void {
+      child.kill("SIGKILL");
+    },
+  };
 }
 
 /**

@@ -185,6 +185,34 @@ export type Store = {
   } | null>;
   deleteBranch: (projectId: string, name: string) => Promise<void>;
   getBranchConnectionString: (branchId: string) => Promise<string | null>;
+  getProjectById: (
+    id: string,
+  ) => Promise<{ id: string; slug: string; owner: string } | null>;
+  // ponytail: project-level roles as text; upgrade to full org/RBAC if teams grow.
+  addInvite: (opts: {
+    projectId: string;
+    email: string;
+    role: string;
+    token: string;
+  }) => Promise<void>;
+  getInviteByToken: (token: string) => Promise<{
+    id: string;
+    projectId: string;
+    email: string;
+    role: string;
+    accepted: boolean;
+  } | null>;
+  acceptInvite: (token: string, accountId: string) => Promise<{
+    projectId: string;
+    role: string;
+  } | null>;
+  listMembers: (projectId: string) => Promise<Array<{
+    accountId: string;
+    role: string;
+    createdAt: string;
+  }>>;
+  removeMember: (projectId: string, accountId: string) => Promise<void>;
+  isMember: (projectId: string, accountId: string) => Promise<string | null>;
   // ponytail: bytea blob storage; upgrade to S3/object store for large assets.
   putBlob: (opts: {
     projectId: string;
@@ -201,6 +229,39 @@ export type Store = {
     projectId: string,
   ) => Promise<Array<{ key: string; contentType: string; size: number; createdAt: string }>>;
   deleteBlob: (projectId: string, key: string) => Promise<void>;
+  addCron: (opts: {
+    projectId: string;
+    name: string;
+    schedule: string;
+    path: string;
+    method: string;
+  }) => Promise<{ id: string }>;
+  listCrons: (projectId: string) => Promise<
+    Array<{
+      id: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      enabled: boolean;
+      lastRunAt: string | null;
+      createdAt: string | null;
+    }>
+  >;
+  deleteCron: (projectId: string, name: string) => Promise<void>;
+  listEnabledCrons: () => Promise<
+    Array<{
+      id: string;
+      projectId: string;
+      slug: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      lastRunAt: string | null;
+    }>
+  >;
+  touchCronRun: (id: string, isoTs: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -378,6 +439,32 @@ export function createStore(opts: CreateStoreOptions): Store {
         throw err;
       }
     }
+    // Project members: team sharing across accounts. UNIQUE(project_id, account_id)
+    // is the dedup guard for acceptInvite's ON CONFLICT.
+    // ponytail: project-level roles as text; upgrade to full org/RBAC if teams grow.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_members (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        account_id text NOT NULL,
+        role text NOT NULL DEFAULT 'member',
+        created_at timestamp DEFAULT now(),
+        UNIQUE(project_id, account_id)
+      )
+    `);
+    // Project invites: email-based invitation tokens. UNIQUE(token) guards the
+    // invite lookup; accepted=true means the invite can't be consumed again.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS project_invites (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        email text NOT NULL,
+        role text NOT NULL DEFAULT 'member',
+        token text UNIQUE NOT NULL,
+        accepted boolean NOT NULL DEFAULT false,
+        created_at timestamp DEFAULT now()
+      )
+    `);
     // Blob/file storage: per-project binary assets, stored as bytea at rest.
     // UNIQUE(project_id, key) makes putBlob (upsert) race-safe.
     // ponytail: bytea in Postgres; upgrade to S3 if large files matter.
@@ -391,6 +478,21 @@ export function createStore(opts: CreateStoreOptions): Store {
         size integer NOT NULL,
         created_at timestamp DEFAULT now(),
         UNIQUE(project_id, key)
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS crons (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id uuid NOT NULL,
+        name text NOT NULL,
+        schedule text NOT NULL,
+        path text NOT NULL,
+        method text NOT NULL DEFAULT 'GET',
+        enabled boolean NOT NULL DEFAULT true,
+        last_run_at timestamp,
+        created_at timestamp DEFAULT now(),
+        UNIQUE(project_id, name),
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
       )
     `);
   }
@@ -433,6 +535,24 @@ export function createStore(opts: CreateStoreOptions): Store {
       `SELECT id, slug, owner FROM projects WHERE slug = $1 LIMIT 1`,
       [slug],
     );
+    const row = result.rows[0];
+    if (!row) return null;
+    return { id: row.id, slug: row.slug, owner: row.owner ?? "" };
+  }
+
+  async function getProjectById(
+    id: string,
+  ): Promise<{ id: string; slug: string; owner: string } | null> {
+    let result;
+    try {
+      result = await pool.query<{ id: string; slug: string; owner: string | null }>(
+        `SELECT id, slug, owner FROM projects WHERE id = $1 LIMIT 1`,
+        [id],
+      );
+    } catch {
+      // Malformed id (e.g. not a valid uuid) -> treat as not found.
+      return null;
+    }
     const row = result.rows[0];
     if (!row) return null;
     return { id: row.id, slug: row.slug, owner: row.owner ?? "" };
@@ -933,6 +1053,13 @@ export function createStore(opts: CreateStoreOptions): Store {
     ]);
     // Blobs are scoped to the project; remove them before the project row.
     await pool.query(`DELETE FROM blobs WHERE project_id = $1`, [projectId]);
+    // Crons cascade via FK, but delete explicitly for clarity / pre-FK rows.
+    await pool.query(`DELETE FROM crons WHERE project_id = $1`, [projectId]);
+    // Members and invites cascade via FK ON DELETE CASCADE on project_id, so no
+    // explicit DELETE is needed — but we do it explicitly for clarity and in case
+    // the FK was added after rows already exist.
+    await pool.query(`DELETE FROM project_members WHERE project_id = $1`, [projectId]);
+    await pool.query(`DELETE FROM project_invites WHERE project_id = $1`, [projectId]);
     await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]);
   }
 
@@ -1099,6 +1226,229 @@ export function createStore(opts: CreateStoreOptions): Store {
     );
   }
 
+  async function addCron(opts: {
+    projectId: string;
+    name: string;
+    schedule: string;
+    path: string;
+    method: string;
+  }): Promise<{ id: string }> {
+    const result = await pool.query<{ id: string }>(
+      `INSERT INTO crons (project_id, name, schedule, path, method)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [opts.projectId, opts.name, opts.schedule, opts.path, opts.method],
+    );
+    return { id: result.rows[0].id };
+  }
+
+  async function listCrons(projectId: string): Promise<
+    Array<{
+      id: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      enabled: boolean;
+      lastRunAt: string | null;
+      createdAt: string | null;
+    }>
+  > {
+    const result = await pool.query<{
+      id: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      enabled: boolean;
+      last_run_at: Date | null;
+      created_at: Date | null;
+    }>(
+      `SELECT id, name, schedule, path, method, enabled, last_run_at, created_at
+       FROM crons WHERE project_id = $1 ORDER BY name ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      schedule: r.schedule,
+      path: r.path,
+      method: r.method,
+      enabled: r.enabled,
+      lastRunAt: r.last_run_at ? r.last_run_at.toISOString() : null,
+      createdAt: r.created_at ? r.created_at.toISOString() : null,
+    }));
+  }
+
+  async function deleteCron(projectId: string, name: string): Promise<void> {
+    await pool.query(`DELETE FROM crons WHERE project_id = $1 AND name = $2`, [
+      projectId,
+      name,
+    ]);
+  }
+
+  async function listEnabledCrons(): Promise<
+    Array<{
+      id: string;
+      projectId: string;
+      slug: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      lastRunAt: string | null;
+    }>
+  > {
+    const result = await pool.query<{
+      id: string;
+      project_id: string;
+      slug: string;
+      name: string;
+      schedule: string;
+      path: string;
+      method: string;
+      last_run_at: Date | null;
+    }>(
+      `SELECT c.id, c.project_id, p.slug, c.name, c.schedule, c.path, c.method, c.last_run_at
+       FROM crons c
+       JOIN projects p ON p.id = c.project_id
+       WHERE c.enabled = true
+       ORDER BY c.name ASC`,
+    );
+    return result.rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      slug: r.slug,
+      name: r.name,
+      schedule: r.schedule,
+      path: r.path,
+      method: r.method,
+      lastRunAt: r.last_run_at ? r.last_run_at.toISOString() : null,
+    }));
+  }
+
+  async function touchCronRun(id: string, isoTs: string): Promise<void> {
+    await pool.query(`UPDATE crons SET last_run_at = $1 WHERE id = $2`, [
+      isoTs,
+      id,
+    ]);
+  }
+
+  // ponytail: project-level roles as text; upgrade to full org/RBAC if teams grow.
+  async function addInvite(opts: {
+    projectId: string;
+    email: string;
+    role: string;
+    token: string;
+  }): Promise<void> {
+    await pool.query(
+      `INSERT INTO project_invites (project_id, email, role, token)
+       VALUES ($1, $2, $3, $4)`,
+      [opts.projectId, opts.email, opts.role, opts.token],
+    );
+  }
+
+  async function getInviteByToken(token: string): Promise<{
+    id: string;
+    projectId: string;
+    email: string;
+    role: string;
+    accepted: boolean;
+  } | null> {
+    const result = await pool.query<{
+      id: string;
+      project_id: string;
+      email: string;
+      role: string;
+      accepted: boolean;
+    }>(
+      `SELECT id, project_id, email, role, accepted FROM project_invites
+       WHERE token = $1 LIMIT 1`,
+      [token],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      email: row.email,
+      role: row.role,
+      accepted: row.accepted,
+    };
+  }
+
+  // Idempotent: if the member row already exists (e.g. double-accept) the ON
+  // CONFLICT is a no-op. The invite is still marked accepted so subsequent calls
+  // to getInviteByToken see accepted=true.
+  async function acceptInvite(
+    token: string,
+    accountId: string,
+  ): Promise<{ projectId: string; role: string } | null> {
+    // Fetch-then-update is safe here because invite tokens are single-use opaque
+    // random values and Node is single-threaded; a race would just double-insert
+    // and the ON CONFLICT guard absorbs it.
+    const result = await pool.query<{
+      project_id: string;
+      role: string;
+      accepted: boolean;
+    }>(
+      `SELECT project_id, role, accepted FROM project_invites
+       WHERE token = $1 LIMIT 1`,
+      [token],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    // Mark accepted (idempotent: no-op if already true).
+    await pool.query(
+      `UPDATE project_invites SET accepted = true WHERE token = $1`,
+      [token],
+    );
+    // Insert member (idempotent via ON CONFLICT DO NOTHING).
+    await pool.query(
+      `INSERT INTO project_members (project_id, account_id, role)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (project_id, account_id) DO NOTHING`,
+      [row.project_id, accountId, row.role],
+    );
+    return { projectId: row.project_id, role: row.role };
+  }
+
+  async function listMembers(projectId: string): Promise<Array<{
+    accountId: string;
+    role: string;
+    createdAt: string;
+  }>> {
+    const result = await pool.query<{
+      account_id: string;
+      role: string;
+      created_at: Date | null;
+    }>(
+      `SELECT account_id, role, created_at FROM project_members
+       WHERE project_id = $1 ORDER BY created_at ASC`,
+      [projectId],
+    );
+    return result.rows.map((r) => ({
+      accountId: r.account_id,
+      role: r.role,
+      createdAt: r.created_at ? r.created_at.toISOString() : "",
+    }));
+  }
+
+  async function removeMember(projectId: string, accountId: string): Promise<void> {
+    await pool.query(
+      `DELETE FROM project_members WHERE project_id = $1 AND account_id = $2`,
+      [projectId, accountId],
+    );
+  }
+
+  async function isMember(projectId: string, accountId: string): Promise<string | null> {
+    const result = await pool.query<{ role: string }>(
+      `SELECT role FROM project_members WHERE project_id = $1 AND account_id = $2 LIMIT 1`,
+      [projectId, accountId],
+    );
+    const row = result.rows[0];
+    return row ? row.role : null;
+  }
+
   async function getBranchConnectionString(
     branchId: string,
   ): Promise<string | null> {
@@ -1126,6 +1476,7 @@ export function createStore(opts: CreateStoreOptions): Store {
     createProject,
     listProjects,
     getProjectBySlug,
+    getProjectById,
     setProjectDbUrl,
     getProjectDbUrl,
     recordDeployment,
@@ -1159,10 +1510,21 @@ export function createStore(opts: CreateStoreOptions): Store {
     getBranchByName,
     deleteBranch,
     getBranchConnectionString,
+    addInvite,
+    getInviteByToken,
+    acceptInvite,
+    listMembers,
+    removeMember,
+    isMember,
     putBlob,
     getBlob,
     listBlobs,
     deleteBlob,
+    addCron,
+    listCrons,
+    deleteCron,
+    listEnabledCrons,
+    touchCronRun,
     close,
   };
 }
