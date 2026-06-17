@@ -1,6 +1,32 @@
 import { describe, it, expect } from "vitest";
 import { createElement } from "react";
-import { renderPage } from "../src/render/ssr.ts";
+import type { ServerResponse } from "node:http";
+import { renderPage, renderPageToStream } from "../src/render/ssr.ts";
+
+// Collect everything written to a ServerResponse-shaped sink.
+function fakeRes() {
+  let body = "";
+  const res = {
+    statusCode: 0,
+    writableEnded: false,
+    headers: {} as Record<string, string>,
+    setHeader(k: string, v: string) {
+      this.headers[k.toLowerCase()] = v;
+    },
+    write(chunk: unknown) {
+      body += String(chunk);
+      return true;
+    },
+    end(chunk?: unknown) {
+      if (chunk !== undefined) body += String(chunk);
+      this.writableEnded = true;
+    },
+    get body() {
+      return body;
+    },
+  };
+  return res;
+}
 
 describe("renderPage", () => {
   it("renders the default component with loader data and embeds the data script", async () => {
@@ -67,5 +93,61 @@ describe("renderPage", () => {
     const mod = { default: () => createElement("h1", null, "x") };
     const html = await renderPage(mod, {}, "/e.js", "index.tsx");
     expect(html).toContain("window.__PODKIT_LAYOUT_DATA__ = []");
+  });
+});
+
+describe("renderPageToStream", () => {
+  function streamToString(
+    mod: Parameters<typeof renderPageToStream>[1],
+    data: unknown,
+    layouts: Parameters<typeof renderPageToStream>[5] = [],
+    layoutData: unknown[] = [],
+  ): Promise<string> {
+    return new Promise((resolve) => {
+      const res = fakeRes();
+      const origEnd = res.end.bind(res);
+      res.end = (chunk?: unknown) => {
+        origEnd(chunk);
+        resolve(res.body);
+      };
+      renderPageToStream(
+        res as unknown as ServerResponse,
+        mod,
+        data,
+        "/entry.js",
+        "index.tsx",
+        layouts,
+        layoutData,
+      );
+    });
+  }
+
+  it("streams head -> shell -> tail with the page markup and data scripts", async () => {
+    const mod = {
+      default: (p: { data: { name: string } }) =>
+        createElement("h1", null, `Hi ${p.data.name}`),
+    };
+    const html = await streamToString(mod, { name: "podkit" });
+    expect(html).toContain('<div id="root">');
+    expect(html).toContain("Hi podkit");
+    expect(html).toContain('window.__PODKIT_DATA__ = {"name":"podkit"}');
+    expect(html).toContain('window.__PODKIT_ROUTE__ = "index.tsx"');
+    expect(html).toContain('src="/entry.js"');
+    // Order: root opens before the closing tag + script tail.
+    expect(html.indexOf('<div id="root">')).toBeLessThan(html.indexOf("</div><script>"));
+  });
+
+  it("passes each layout its own data when streaming", async () => {
+    const page = {
+      default: (p: { data: { tag: string } }) => createElement("main", null, p.data.tag),
+    };
+    const layout = {
+      default: (p: { data: { lt: string }; children: unknown }) =>
+        createElement("div", null, p.data.lt, p.children as never),
+    };
+    const html = await streamToString(page, { tag: "P" }, [layout], [{ lt: "L" }]);
+    expect(html).toContain("L");
+    expect(html).toContain("P");
+    expect(html).toContain('window.__PODKIT_LAYOUT_DATA__ = [{"lt":"L"}]');
   });
 });

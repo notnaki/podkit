@@ -7,7 +7,7 @@ import { verifyToken } from "@podkit/auth";
 import { createSink } from "@podkit/telemetry";
 import { matchRoute } from "../routing/match.ts";
 import { runLoader } from "../loader/run.ts";
-import { renderPage } from "../render/ssr.ts";
+import { renderPageToStream } from "../render/ssr.ts";
 import { extractToken } from "../request/token.ts";
 import { handleAction } from "../request/respond.ts";
 import { buildRequestEvent } from "../request/log.ts";
@@ -147,11 +147,9 @@ export async function createProdServer(opts: ProdServerOptions) {
       );
       // Each layout runs its own loader with the same ctx as the page.
       const layoutData = await Promise.all(layoutMods.map((lm) => runLoader(lm, ctx)));
-      const html = await renderPage(mod, data, manifest.clientEntry, m.route.file, layoutMods, layoutData);
+      // Stream the HTML response (head -> React shell -> tail).
       status = 200;
-      res.statusCode = 200;
-      res.setHeader("content-type", "text/html");
-      res.end(html);
+      renderPageToStream(res, mod, data, manifest.clientEntry, m.route.file, layoutMods, layoutData);
     } catch (err) {
       status = 500;
       res.statusCode = 500;
